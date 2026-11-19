@@ -1,0 +1,6 @@
+##gff-version 3
+HBB_HUMAN	UniProtKB	Helix	5	19	.	+	.	ID=helixA;Name=Helix A;Note=N-terminal globin A-helix;Dbxref=UniProtKB:P68871
+HBB_HUMAN	UniProtKB	Helix	20	35	.	+	.	ID=helixB;Name=Helix B;Note=Globin B-helix;Dbxref=UniProtKB:P68871
+HBB_HUMAN	UniProtKB	Binding_site	64	64	.	+	.	ID=his64;Name=Distal His64;Note=O2 hydrogen bond stabilization;Dbxref=UniProtKB:P68871
+HBB_HUMAN	UniProtKB	Active_site	93	93	.	+	.	ID=his93;Name=Proximal His93;Note=Heme iron axial ligand;Dbxref=UniProtKB:P68871
+HBB_HUMAN	UniProtKB	Helix	124	146	.	+	.	ID=helixH;Name=Helix H;Note=C-terminal globin H-helix;Dbxref=UniProtKB:P68871

@@ -1,0 +1,37 @@
+LOCUS       NM_000518_HBB            444 bp    DNA     linear   PRI 19-NOV-2026
+DEFINITION  Homo sapiens hemoglobin subunit beta (HBB) coding sequence.
+ACCESSION   NM_000518
+SOURCE      Homo sapiens (human)
+  ORGANISM  Homo sapiens
+FEATURES             Location/Qualifiers
+     gene            1..444
+                     /gene="HBB"
+                     /note="Hemoglobin subunit beta gene coding region"
+     CDS             1..444
+                     /gene="HBB"
+                     /product="Hemoglobin subunit beta"
+                     /db_xref="UniProtKB/Swiss-Prot:P68871"
+                     /note="Translates directly to UniProt P68871 / AlphaFold AF-P68871-F1"
+     variation       19..21
+                     /gene="HBB"
+                     /label="HbS / HbC Codon 7"
+                     /note="GAG (Glu) -> GTG (Val, Sickle-cell HbS) or AAG (Lys, HbC)"
+                     /db_xref="UniProtKB/Swiss-Prot:P68871"
+     misc_feature    190..192
+                     /label="Distal His64"
+                     /note="Stabilizes bound O2 in the heme pocket"
+                     /db_xref="UniProtKB/Swiss-Prot:P68871"
+     misc_feature    277..279
+                     /label="Proximal His93"
+                     /note="Coordinates heme prosthetic group iron atom"
+                     /db_xref="UniProtKB/Swiss-Prot:P68871"
+ORIGIN
+        1 atggtgcatc tgactcctga ggagaagtct gccgttactg ccctgtgggg caaggtgaac
+       61 gtggatgaag ttggtggtga ggccctgggc aggctgctgg tggtctaccc ttggacccag
+      121 aggttctttg agtcctttgg ggatctgtcc actcctgatg ctgttatggg caaccctaag
+      181 gtgaaggctc atggcaagaa agtgctcggt gcctttagtg atggcctggc tcacctggac
+      241 aacctcaagg gcacctttgc cacactgagt gagctgcact gtgacaagct gcacgtggat
+      301 cctgagaact tcaggctcct gggcaacgtg ctggtctgtg tgctggccca tcactttggc
+      361 aaagaattca ccccaccagt gcaggctgcc tatcagaaag tggtggctgg tgtggctaat
+      421 gccctggccc acaagtatca ctaa
+//

@@ -1,0 +1,18 @@
+[package]
+name = "helix-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Modern Geneious Prime-inspired desktop GUI for alignment inspection and separate-window 3D protein visualization."
+
+[[bin]]
+name = "helix-prime"
+path = "src/main.rs"
+
+[dependencies]
+helix-core = { path = "../helix-core" }
+eframe = { version = "0.30", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui = "0.30"
+rfd = "0.15"
+serde.workspace = true

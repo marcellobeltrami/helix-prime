@@ -1,0 +1,13 @@
+[package]
+name = "helix-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Core bioinformatics data structures, parsers, alignment engine, UniProt/AlphaFold clients, and 3D protein structure model."
+
+[dependencies]
+native-tls = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
