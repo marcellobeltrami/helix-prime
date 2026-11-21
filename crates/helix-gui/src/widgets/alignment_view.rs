@@ -9,18 +9,281 @@ use crate::theme::{residue_colors, Palette};
 use egui::{
     Align2, Color32, Context, FontId, Frame, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2,
 };
-use helix_core::sequence::{is_gap, translate_aligned_region};
+use helix_core::sequence::{complement_nucleotide, is_gap, translate_aligned_region};
 use helix_core::{pack_annotation_lanes, Strand};
 
-const GUTTER_WIDTH: f32 = 192.0;
-const OVERVIEW_HEIGHT: f32 = 34.0;
-const IDENTITY_HEIGHT: f32 = 28.0;
+const GUTTER_WIDTH: f32 = 165.0;
+const OVERVIEW_HEIGHT: f32 = 30.0;
+const IDENTITY_HEIGHT: f32 = 26.0;
 const CONSENSUS_HEIGHT: f32 = 22.0;
 const RULER_HEIGHT: f32 = 20.0;
+const RESTRICTION_HEIGHT: f32 = 22.0;
 const ANN_LANE_HEIGHT: f32 = 22.0;
 const TRANSLATION_HEIGHT: f32 = 20.0;
 
+/// Renders the alignment body (Overview + Linear or Wrapped canvas) inside the Document Viewer.
+pub fn show_alignment_view_body(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) {
+    let pal = Palette::for_mode(app.theme);
+
+    if app.current_alignment().is_none() {
+        return;
+    }
+
+    // Handle direct keyboard editing when `Allow Editing` is enabled and no text box has focus.
+    handle_direct_sequence_editing(app, ctx);
+
+    // Ensure restriction sites cache is warm when overlay is toggled on.
+    if app.display.show_restriction_sites {
+        if let Some(doc) = app.current_doc_mut() {
+            let _ = doc.ensure_restriction_sites();
+        }
+    }
+
+    if app.display.wrap_sequence {
+        show_wrapped_view(app, ui, &pal);
+        return;
+    }
+
+    if app.display.show_overview {
+        show_overview_bar(app, ui, &pal);
+    }
+
+    show_main_grid(app, ctx, ui, &pal);
+}
+
+/// Processes keyboard input for direct sequence editing (`Allow Editing`) and cursor movement.
+fn handle_direct_sequence_editing(app: &mut HelixApp, ctx: &Context) {
+    if ctx.wants_keyboard_input() {
+        return;
+    }
+    let Some(doc) = app.docs.get(app.active_doc) else {
+        return;
+    };
+    let width = doc.alignment.width();
+    if width == 0 {
+        return;
+    }
+    let is_nuc = doc.alignment.alphabet.is_nucleotide();
+
+    // Left / Right arrow cursor navigation always works nicely.
+    let (left, right, backspace, delete, typed_chars) = ctx.input(|i| {
+        let mut chars = Vec::new();
+        for ev in &i.events {
+            if let egui::Event::Text(txt) = ev {
+                for ch in txt.chars() {
+                    if ch.is_ascii_alphabetic() || ch == '-' {
+                        chars.push(ch.to_ascii_uppercase() as u8);
+                    }
+                }
+            }
+        }
+        (
+            i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight),
+            i.key_pressed(egui::Key::Backspace),
+            i.key_pressed(egui::Key::Delete),
+            chars,
+        )
+    });
+
+    if left && app.cursor_col > 0 {
+        app.cursor_col -= 1;
+        app.scroll_to_column = Some(app.cursor_col);
+    }
+    if right && app.cursor_col + 1 < width {
+        app.cursor_col += 1;
+        app.scroll_to_column = Some(app.cursor_col);
+    }
+
+    if !app.display.allow_editing {
+        return;
+    }
+
+    let row = app.cursor_row;
+    let mut mutated = false;
+    if backspace && app.cursor_col > 0 {
+        let target = app.cursor_col - 1;
+        if let Some(doc) = app.current_doc_mut() {
+            if doc.alignment.delete_column_at(target) {
+                doc.invalidate_caches();
+                app.cursor_col = target;
+                mutated = true;
+            }
+        }
+    } else if delete {
+        let target = app.cursor_col;
+        let new_width = app.current_doc_mut().and_then(|doc| {
+            if doc.alignment.delete_column_at(target) {
+                doc.invalidate_caches();
+                Some(doc.alignment.width())
+            } else {
+                None
+            }
+        });
+        if let Some(w) = new_width {
+            app.cursor_col = target.min(w.saturating_sub(1));
+            mutated = true;
+        }
+    } else if !typed_chars.is_empty() {
+        for b in typed_chars {
+            let valid = if is_nuc {
+                matches!(b, b'A' | b'C' | b'G' | b'T' | b'U' | b'N' | b'-')
+            } else {
+                b.is_ascii_alphabetic() || b == b'-'
+            };
+            if valid {
+                let col = app.cursor_col;
+                if let Some(doc) = app.current_doc_mut() {
+                    if doc.alignment.insert_residue_at(row, col, b) {
+                        doc.invalidate_caches();
+                        app.cursor_col = col.saturating_add(1);
+                        mutated = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if mutated {
+        app.rebuild_3d_alignment_map();
+        app.status_message = format!("Edited sequence at base {}.", app.cursor_col + 1);
+    }
+}
+
+/// Renders the multi-line Wrapped Sequence View (`Wrap` checkbox in Geneious Prime).
+fn show_wrapped_view(app: &mut HelixApp, ui: &mut Ui, pal: &Palette) {
+    let Some(doc) = app.docs.get(app.active_doc) else {
+        return;
+    };
+    let aln = &doc.alignment;
+    let width = aln.width();
+    let is_nuc = aln.alphabet.is_nucleotide();
+    let show_comp = app.display.show_complement && is_nuc;
+    let col_w = app.display.col_width.clamp(8.0, 22.0);
+    let avail_w = (ui.available_width() - 120.0).max(160.0);
+    let cols_per_line = ((avail_w / col_w).floor() as usize).clamp(20, 120);
+    let blocks = width.div_ceil(cols_per_line);
+
+    let mut clicked_col: Option<usize> = None;
+
+    egui::ScrollArea::vertical()
+        .id_salt("wrapped_seq_scroll")
+        .show(ui, |ui| {
+            ui.add_space(6.0);
+            for block in 0..blocks {
+                let start = block * cols_per_line;
+                let end = (start + cols_per_line).min(width);
+                let len = end - start;
+
+                let row_h = app.display.row_height;
+                let seq_rows = aln.row_count();
+                let per_seq_h = if show_comp { row_h * 1.85 } else { row_h };
+                let block_h = RULER_HEIGHT + seq_rows as f32 * per_seq_h + 10.0;
+
+                let (rect, resp) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), block_h),
+                    Sense::click(),
+                );
+                let painter = ui.painter_at(rect);
+                let left_x = rect.min.x + 110.0;
+
+                // Coordinate ruler for this wrapped block.
+                for local in 0..len {
+                    let col = start + local;
+                    if (col + 1) % 10 == 0 || local == 0 {
+                        let x = left_x + local as f32 * col_w + col_w * 0.5;
+                        painter.text(
+                            Pos2::new(x, rect.min.y + 8.0),
+                            Align2::CENTER_CENTER,
+                            (col + 1).to_string(),
+                            FontId::monospace(9.5),
+                            pal.text_muted,
+                        );
+                    }
+                }
+
+                let mono = FontId::monospace((col_w * 0.78).clamp(8.5, 14.0));
+                for (r_idx, seq) in aln.sequences().iter().enumerate() {
+                    let ry = rect.min.y + RULER_HEIGHT + r_idx as f32 * per_seq_h;
+                    let short_name: String = seq.name.chars().take(13).collect();
+                    painter.text(
+                        Pos2::new(rect.min.x + 8.0, ry + row_h * 0.5),
+                        Align2::LEFT_CENTER,
+                        short_name,
+                        FontId::proportional(11.0),
+                        pal.text_primary,
+                    );
+
+                    for local in 0..len {
+                        let col = start + local;
+                        let x0 = left_x + local as f32 * col_w;
+                        let cell = Rect::from_min_max(
+                            Pos2::new(x0, ry + 1.0),
+                            Pos2::new(x0 + col_w, ry + row_h - 1.0),
+                        );
+                        let res = seq.residues[col];
+                        let cons = aln.columns()[col].consensus;
+                        let (bg, fg) = residue_colors(
+                            res,
+                            cons,
+                            aln.alphabet,
+                            app.display.color_scheme,
+                            app.display.highlight_mode,
+                            app.theme,
+                        );
+                        if let Some(bg_c) = bg {
+                            painter.rect_filled(cell, 1.0, bg_c);
+                        }
+                        let b = [res];
+                        painter.text(
+                            cell.center(),
+                            Align2::CENTER_CENTER,
+                            std::str::from_utf8(&b).unwrap_or("?"),
+                            mono.clone(),
+                            fg,
+                        );
+
+                        if show_comp {
+                            let comp = [complement_nucleotide(res)];
+                            painter.text(
+                                Pos2::new(cell.center().x, ry + row_h + row_h * 0.38),
+                                Align2::CENTER_CENTER,
+                                std::str::from_utf8(&comp).unwrap_or(" "),
+                                FontId::monospace((col_w * 0.68).clamp(8.0, 12.0)),
+                                pal.text_muted,
+                            );
+                        }
+
+                        if col == app.cursor_col {
+                            painter.line_segment(
+                                [Pos2::new(x0, ry), Pos2::new(x0, ry + per_seq_h - 2.0)],
+                                Stroke::new(2.0, pal.accent),
+                            );
+                        }
+                    }
+                }
+
+                if resp.clicked() {
+                    if let Some(ptr) = resp.interact_pointer_pos() {
+                        if ptr.x >= left_x {
+                            let local = ((ptr.x - left_x) / col_w) as usize;
+                            if local < len {
+                                clicked_col = Some(start + local);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+    if let Some(col) = clicked_col {
+        app.cursor_col = col;
+        app.selected_cols = Some((col, col + 1));
+    }
+}
+
 /// Renders the central alignment document header, overview minimap, and main sequence canvas.
+#[allow(dead_code)]
 pub fn show_alignment_view(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) {
     let pal = Palette::for_mode(app.theme);
 
@@ -34,16 +297,8 @@ pub fn show_alignment_view(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) {
         return;
     }
 
-    // 1. Document header bar + contextual selected-annotation 3D bar.
     show_document_header(app, ctx, ui, &pal);
-
-    // 2. Overview minimap bar (full-length conservation & annotation overview with viewport box).
-    if app.display.show_overview {
-        show_overview_bar(app, ui, &pal);
-    }
-
-    // 3. Main scrollable alignment canvas.
-    show_main_grid(app, ctx, ui, &pal);
+    show_alignment_view_body(app, ctx, ui);
 }
 
 fn show_document_header(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette) {
@@ -276,8 +531,10 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
     }
     app.horizontal_scroll_px = app.horizontal_scroll_px.clamp(0.0, max_h_scroll);
 
-    // Now borrow `aln` immutably across the painting pass.
-    let aln = &app.docs[app.active_doc].alignment;
+    // Now borrow `doc` and `aln` immutably across the painting pass.
+    let doc = &app.docs[app.active_doc];
+    let aln = &doc.alignment;
+    let restriction_sites = doc.restriction_cache.as_deref().unwrap_or(&[]);
 
     // Pack annotations into non-overlapping lanes.
     let (ann_lanes, ann_lane_map) = if app.display.show_annotations {
@@ -287,6 +544,9 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
     };
 
     let show_trans = app.display.show_translation && is_nuc;
+    let show_restr = app.display.show_restriction_sites && is_nuc;
+    let show_comp = app.display.show_complement && is_nuc;
+    let effective_row_h = if show_comp { row_h * 1.85 } else { row_h };
 
     // Compute vertical layout heights.
     let identity_h = if app.display.show_identity_graph {
@@ -299,10 +559,11 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
     } else {
         0.0
     };
+    let restr_h = if show_restr { RESTRICTION_HEIGHT } else { 0.0 };
     let ann_h = ann_lanes as f32 * ANN_LANE_HEIGHT;
     let trans_h = if show_trans { TRANSLATION_HEIGHT } else { 0.0 };
-    let header_tracks_h = identity_h + consensus_h + RULER_HEIGHT + ann_h + trans_h;
-    let sequences_h = row_count as f32 * row_h;
+    let header_tracks_h = identity_h + consensus_h + RULER_HEIGHT + restr_h + ann_h + trans_h;
+    let sequences_h = row_count as f32 * effective_row_h;
 
     // Determine column highlighted via bidirectional sync from the 3D Protein Window!
     let synced_3d_cols: Option<(usize, usize)> = app.viewer3d.alignment_map.as_ref().and_then(|map| {
@@ -361,7 +622,7 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
                 }
                 let seq_top = canvas_rect.min.y + header_tracks_h;
                 if ptr.y >= seq_top {
-                    let r = ((ptr.y - seq_top) / row_h) as usize;
+                    let r = ((ptr.y - seq_top) / effective_row_h) as usize;
                     if r < row_count {
                         new_hover_row = Some(r);
                     }
@@ -369,7 +630,7 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
             }
 
             // Drag or click in sequence/ruler area to select columns & sync with 3D viewer!
-            let ann_top_y = canvas_rect.min.y + identity_h + consensus_h + RULER_HEIGHT;
+            let ann_top_y = canvas_rect.min.y + identity_h + consensus_h + RULER_HEIGHT + restr_h;
             let ann_bottom_y = ann_top_y + ann_h;
 
             if response.clicked() {
@@ -499,6 +760,46 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
                 Stroke::new(1.0, pal.border),
             );
             y += RULER_HEIGHT;
+
+            // --- Track 3b: Optional Restriction Enzyme Cleavage Sites Track ---
+            if show_restr {
+                draw_gutter_label(
+                    &painter,
+                    canvas_rect.min.x,
+                    y,
+                    RESTRICTION_HEIGHT,
+                    "Restriction Sites",
+                    Color32::from_rgb(192, 68, 128),
+                    pal.border,
+                );
+                let mut last_label_x = f32::NEG_INFINITY;
+                for hit in restriction_sites {
+                    if hit.cut_col < first_col || hit.cut_col >= last_col {
+                        continue;
+                    }
+                    let cx = col_to_x(hit.cut_col);
+                    let site_col = Color32::from_rgb(196, 62, 124);
+                    data_painter.line_segment(
+                        [Pos2::new(cx, y + RESTRICTION_HEIGHT - 8.0), Pos2::new(cx, y + RESTRICTION_HEIGHT)],
+                        Stroke::new(1.8, site_col),
+                    );
+                    if cx > last_label_x + 36.0 {
+                        data_painter.text(
+                            Pos2::new(cx + 2.0, y + 7.0),
+                            Align2::LEFT_CENTER,
+                            hit.enzyme_name,
+                            FontId::proportional(10.0),
+                            site_col,
+                        );
+                        last_label_x = cx;
+                    }
+                }
+                painter.line_segment(
+                    [Pos2::new(canvas_rect.min.x, y + RESTRICTION_HEIGHT), Pos2::new(canvas_rect.max.x, y + RESTRICTION_HEIGHT)],
+                    Stroke::new(1.0, pal.border),
+                );
+                y += RESTRICTION_HEIGHT;
+            }
 
             // --- Track 4: Packed Annotation Arrow Tracks ---
             if ann_lanes > 0 {
@@ -648,15 +949,15 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
                 y += TRANSLATION_HEIGHT;
             }
 
-            // --- Track 6: Aligned Sequence Rows ---
+            // --- Track 6: Aligned Sequence Rows (with optional Complement 3'->5' strand) ---
             let seq_start_y = y;
             for (row_idx, seq) in aln.sequences().iter().enumerate() {
-                let ry = seq_start_y + row_idx as f32 * row_h;
+                let ry = seq_start_y + row_idx as f32 * effective_row_h;
 
                 // Subtle alternating row shading.
                 if row_idx % 2 == 1 {
                     painter.rect_filled(
-                        Rect::from_min_max(Pos2::new(canvas_rect.min.x, ry), Pos2::new(canvas_rect.max.x, ry + row_h)),
+                        Rect::from_min_max(Pos2::new(canvas_rect.min.x, ry), Pos2::new(canvas_rect.max.x, ry + effective_row_h)),
                         0.0,
                         pal.row_alt_bg,
                     );
@@ -677,9 +978,18 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
                     Pos2::new(gutter_cell.min.x + 10.0, gutter_cell.center().y),
                     Align2::LEFT_CENTER,
                     row_label,
-                    FontId::proportional(12.0),
+                    FontId::proportional(11.5),
                     pal.text_primary,
                 );
+                if show_comp {
+                    painter.text(
+                        Pos2::new(canvas_rect.min.x + 18.0, ry + row_h + row_h * 0.35),
+                        Align2::LEFT_CENTER,
+                        "3'->5' Comp",
+                        FontId::proportional(9.5),
+                        pal.text_muted,
+                    );
+                }
 
                 // Draw visible columns for this sequence row.
                 for col in first_col..last_col {
@@ -717,24 +1027,50 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
                         let buf = [draw_byte];
                         let s = std::str::from_utf8(&buf).unwrap_or("?");
                         data_painter.text(cell.center(), Align2::CENTER_CENTER, s, mono_font.clone(), fg);
+
+                        if show_comp {
+                            let comp_byte = [complement_nucleotide(residue)];
+                            let comp_s = std::str::from_utf8(&comp_byte).unwrap_or(" ");
+                            data_painter.text(
+                                Pos2::new(cell.center().x, ry + row_h + row_h * 0.35),
+                                Align2::CENTER_CENTER,
+                                comp_s,
+                                FontId::monospace((font_size * 0.85).max(8.0)),
+                                pal.text_muted,
+                            );
+                        }
                     }
                 }
             }
 
-            // --- Overlays: Motif search hits ---
+            // --- Overlay: Motif search hits ---
             for (hit_idx, hit) in app.motif_hits.iter().enumerate() {
                 if hit.end_col <= first_col || hit.start_col >= last_col {
                     continue;
                 }
                 let hx0 = col_to_x(hit.start_col);
                 let hx1 = col_to_x(hit.end_col);
-                let hy0 = seq_start_y + hit.row as f32 * row_h;
+                let hy0 = seq_start_y + hit.row as f32 * effective_row_h;
                 let h_rect = Rect::from_min_max(Pos2::new(hx0, hy0), Pos2::new(hx1, hy0 + row_h));
                 let stroke_w = if hit_idx == app.active_motif_hit { 2.4 } else { 1.5 };
                 data_painter.rect_stroke(
                     h_rect,
                     2.0,
                     Stroke::new(stroke_w, pal.motif_highlight),
+                );
+            }
+
+            // --- Overlay: Active Base Cursor Indicator (like `1,179` vertical cursor in screenshot) ---
+            if app.cursor_col >= first_col && app.cursor_col < last_col {
+                let cx = col_to_x(app.cursor_col);
+                let cursor_col_color = if app.display.allow_editing {
+                    Color32::from_rgb(224, 96, 36)
+                } else {
+                    pal.accent
+                };
+                data_painter.line_segment(
+                    [Pos2::new(cx, seq_start_y - 4.0), Pos2::new(cx, seq_start_y + sequences_h)],
+                    Stroke::new(2.0, cursor_col_color),
                 );
             }
 
@@ -848,8 +1184,12 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
         app.open_3d_for_accession(ctx, &acc, Some(ann_id));
     }
 
-    // Clicking a column in the alignment immediately highlights the mapped residue in the 3D window!
+    // Clicking a column in the alignment updates the active cursor & highlights the mapped residue in 3D!
     if let Some(col) = clicked_col_sync_3d {
+        app.cursor_col = col;
+        if let Some(r) = new_hover_row {
+            app.cursor_row = r;
+        }
         if let Some(ref map) = app.viewer3d.alignment_map {
             if let Some(res_idx) = map.residue_for_column(col) {
                 app.viewer3d.selected_residue = Some(res_idx);

@@ -32,7 +32,13 @@ pub fn show_circular_view(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) {
     show_circular_header(app, ctx, ui, &pal);
 
     // 2. Main interactive circular map canvas.
-    show_circular_canvas(app, ctx, ui, &pal);
+    show_circular_canvas_embedded(app, ctx, ui, &pal);
+}
+
+/// Renders the interactive circular genome map without the header strip (used both by full
+/// Phage Circular View and by the Geneious Prime left-side Circular Overview split view).
+pub fn show_circular_canvas_embedded(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette) {
+    show_circular_canvas(app, ctx, ui, pal);
 }
 
 fn show_circular_header(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette) {
@@ -519,6 +525,20 @@ fn show_circular_canvas(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Pa
         );
     }
 
+    // Iconic Geneious Prime green cursor indicator bar on the circle pointing to `app.cursor_col`!
+    let cur_a = col_to_angle(app.cursor_col as f32 + 0.5);
+    painter.line_segment(
+        [polar(base_r * 0.78, cur_a), polar(outer_highlight_r + 10.0, cur_a)],
+        Stroke::new(3.0, Color32::from_rgb(38, 168, 76)),
+    );
+    painter.text(
+        polar(outer_highlight_r + 22.0, cur_a),
+        Align2::CENTER_CENTER,
+        format!("{}", app.cursor_col + 1),
+        FontId::monospace(9.5),
+        Color32::from_rgb(38, 138, 200),
+    );
+
     if let Some(hcol) = hovered_col {
         let ha = col_to_angle(hcol as f32 + 0.5);
         painter.line_segment(
@@ -528,37 +548,43 @@ fn show_circular_canvas(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Pa
     }
 
     // --- Layer 8: Center Genome Medallion ---
-    let hub_r = (inner_cursor_r * 0.82).clamp(38.0, base_r * 0.34);
+    // Guard upper/lower bounds dynamically so narrow split panes never violate `min <= max`.
+    let hub_max = (base_r * 0.40).max(18.0);
+    let hub_min = (base_r * 0.24).clamp(14.0, hub_max);
+    let hub_r = (inner_cursor_r * 0.82).clamp(hub_min, hub_max);
     painter.circle_filled(center, hub_r, pal.panel_bg);
     painter.circle_stroke(center, hub_r, Stroke::new(1.2, pal.border));
 
-    let short_title = truncate_label(&aln.name, 22);
+    let short_title = truncate_label(&aln.name, if hub_r < 36.0 { 14 } else { 22 });
+    let title_sz = if hub_r < 36.0 { 10.5 } else { 12.5 };
     painter.text(
-        Pos2::new(center.x, center.y - 16.0),
+        Pos2::new(center.x, center.y - 14.0),
         Align2::CENTER_CENTER,
         short_title,
-        FontId::proportional(12.5),
+        FontId::proportional(title_sz),
         pal.text_primary,
     );
     let unit = if aln.alphabet.is_nucleotide() { "bp" } else { "aa" };
     painter.text(
         Pos2::new(center.x, center.y + 2.0),
         Align2::CENTER_CENTER,
-        format!("{} {unit}  (Circular)", aln.width()),
-        FontId::monospace(11.0),
+        format!("{} {unit}", aln.width()),
+        FontId::monospace(if hub_r < 36.0 { 9.5 } else { 11.0 }),
         pal.accent,
     );
-    painter.text(
-        Pos2::new(center.x, center.y + 18.0),
-        Align2::CENTER_CENTER,
-        format!(
-            "{} strains  |  {:.0}% ID",
-            aln.row_count(),
-            aln.mean_pairwise_identity_pct()
-        ),
-        FontId::proportional(10.0),
-        pal.text_muted,
-    );
+    if hub_r >= 30.0 {
+        painter.text(
+            Pos2::new(center.x, center.y + 16.0),
+            Align2::CENTER_CENTER,
+            format!(
+                "{} seqs | {:.0}% ID",
+                aln.row_count(),
+                aln.mean_pairwise_identity_pct()
+            ),
+            FontId::proportional(9.5),
+            pal.text_muted,
+        );
+    }
 
     // Subtle circular legend & interaction hint in bottom corners.
     painter.text(
@@ -605,6 +631,7 @@ fn show_circular_canvas(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Pa
     }
 
     if let Some(col) = click_sync_col {
+        app.cursor_col = col;
         app.selected_cols = Some((col, col + 1));
         app.scroll_to_column = Some(col);
         if let Some(ref map) = app.viewer3d.alignment_map {

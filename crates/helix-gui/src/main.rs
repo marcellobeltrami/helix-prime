@@ -8,6 +8,7 @@
 
 mod app;
 mod renderer3d;
+mod sys_mem;
 mod theme;
 mod widgets;
 

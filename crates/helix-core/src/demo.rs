@@ -11,28 +11,87 @@ use std::ops::{Add, Sub};
 #[derive(Debug, Clone)]
 pub struct DemoDocument {
     pub folder: &'static str,
+    pub is_circular: bool,
+    pub modified: &'static str,
     pub alignment: Alignment,
 }
 
-/// Constructs the default set of biologically curated alignments loaded on startup.
+/// Constructs the default set of biologically curated documents loaded on startup,
+/// mirroring the Geneious Prime Sample Documents hierarchy.
 #[must_use]
 pub fn build_default_workspace() -> Vec<DemoDocument> {
     vec![
         DemoDocument {
-            folder: "Protein Alignments",
+            folder: "Cloning",
+            is_circular: true,
+            modified: "30 Aug 2026",
+            alignment: build_pcrii_topo_vector(),
+        },
+        DemoDocument {
+            folder: "Cloning",
+            is_circular: true,
+            modified: "15 Nov 2026",
+            alignment: build_pdest15_vector(),
+        },
+        DemoDocument {
+            folder: "Cloning",
+            is_circular: true,
+            modified: "15 Nov 2026",
+            alignment: build_pdonr201_vector(),
+        },
+        DemoDocument {
+            folder: "Cloning",
+            is_circular: true,
+            modified: "27 May 2026",
+            alignment: build_biobrick_vector(),
+        },
+        DemoDocument {
+            folder: "Alignments",
+            is_circular: false,
+            modified: "19 Nov 2026",
             alignment: build_hbb_protein_alignment(),
         },
         DemoDocument {
-            folder: "Protein Alignments",
+            folder: "Alignments",
+            is_circular: false,
+            modified: "19 Nov 2026",
             alignment: build_tp53_dbd_alignment(),
         },
         DemoDocument {
-            folder: "Nucleotide CDS",
+            folder: "Alignments",
+            is_circular: false,
+            modified: "19 Nov 2026",
             alignment: build_hbb_dna_cds_alignment(),
         },
         DemoDocument {
-            folder: "Phage Genomes",
+            folder: "Genomes",
+            is_circular: true,
+            modified: "19 Nov 2026",
             alignment: build_bacteriophage_circular_alignment(),
+        },
+        DemoDocument {
+            folder: "Contig Assembly",
+            is_circular: false,
+            modified: "18 Nov 2026",
+            alignment: build_sanger_reads_sample(),
+        },
+        DemoDocument {
+            folder: "Plasmids",
+            is_circular: true,
+            modified: "14 Nov 2026",
+            alignment: build_puc_gfp_plasmid(),
+        },
+        DemoDocument {
+            folder: "Primers",
+            is_circular: false,
+            modified: "18 Nov 2026",
+            alignment: build_sample_primers(),
+        },
+        DemoDocument {
+            folder: "Protein Documents",
+            is_circular: false,
+            modified: "19 Nov 2026",
+            alignment: build_single_hbb_protein(),
         },
     ]
 }
@@ -469,6 +528,259 @@ fn build_bacteriophage_circular_alignment() -> Alignment {
             ),
     );
 
+    aln
+}
+
+/// Deterministic plasmid backbone filler generating realistic non-repetitive DNA of `len` bp
+/// while embedding exact reference feature signatures and MCS restriction sites at target positions.
+fn build_plasmid_backbone(total_len: usize, seed: u64, embeds: &[(usize, &[u8])]) -> Vec<u8> {
+    const BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
+    let mut seq = Vec::with_capacity(total_len);
+    let mut state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    for _ in 0..total_len {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        seq.push(BASES[((state >> 33) as usize) & 3]);
+    }
+    for &(pos, frag) in embeds {
+        for (i, &b) in frag.iter().enumerate() {
+            if pos + i < seq.len() {
+                seq[pos + i] = b;
+            }
+        }
+    }
+    seq
+}
+
+/// Invitrogen TOPO-TA Cloning Vector `pCRII-TOPO` (3,973 bp circular plasmid matching screenshot).
+fn build_pcrii_topo_vector() -> Alignment {
+    let mcs = b"TAATACGACTCACTATAGGGCGAAATTGGGCCCGACGTCGCATGCTCCCGGCCGCCATGGCGGCCGCGGGAATTCGATTGGATCCACTAGTAACGGCCGCCAGTGTGCTGGAATTCGCCCTTAAGCTTGGTACCGAGCTCGGATCC";
+    let f1_sig = b"ACGCGCCCTGTAGCGGCGCATTAAGCGCGGCGGGTGTGGTGGTTACGCGCAGCGTGACCGCTACACTTGCCAGCGCCCTAGCGCCCGCTCCTTTCGCTTTCTTCC";
+    let kan_sig = b"ATGATTGAACAAGATGGATTGCACGCAGGTTCTCCGGCCGCTTGGGTGGAGAGGCTATTCGGCTATGACTGGGCACAACAGACAATCGGCTGCTCTGATGCCGCC";
+    let amp_sig = b"ATGAGTATTCAACATTTCCGTGTCGCCCTTATTCCCTTTTTTGCGGCATTTTGCCTTCCTGTTTTTGCTCACCCAGAAACGCTGGTGAAAGTAAAAGATGCTGAA";
+    let puc_sig = b"TTGAGATCCTTTTTTTCTGCGCGTAATCTGCTGCTTGCAAACAAAAAAACCACCGCTACCAGCGGTGGTTTGTTTGCCGGATCAAGAGCTACCAACTCTTTTTCC";
+
+    let seq = build_plasmid_backbone(
+        3973,
+        42,
+        &[
+            (220, mcs),
+            (610, f1_sig),
+            (1320, kan_sig),
+            (2150, amp_sig),
+            (3180, puc_sig),
+        ],
+    );
+
+    let mut aln = Alignment::new(
+        "pCRII-TOPO",
+        Alphabet::Dna,
+        vec![Sequence::new("pCRII-TOPO", &seq)
+            .with_description("Invitrogen TOPO-TA Cloning Vector (3,973 bp circular)")
+            .with_organism("Synthetic cloning vector")],
+    )
+    .unwrap_or_else(|_| unreachable!("valid plasmid"))
+    .with_description("Invitrogen TOPO-TA Cloning Vector");
+
+    aln.add_annotation(
+        Annotation::new(0, "LacZa", FeatureKind::Cds, 180, 560)
+            .with_strand(Strand::Forward)
+            .with_notes("LacZ alpha fragment with embedded TOPO-TA MCS (EcoRI, BamHI, HindIII, SpeI, NotI, KpnI, SacI).")
+            .with_uniprot(UniProtLink::new("P00722").with_metadata("BGAL_ECOLI", "Beta-galactosidase", "Escherichia coli")),
+    );
+    aln.add_annotation(
+        Annotation::new(0, "T7 Promoter", FeatureKind::Motif, 220, 240)
+            .with_strand(Strand::Forward)
+            .with_notes("T7 RNA polymerase promoter flanking the TOPO cloning site."),
+    );
+    aln.add_annotation(
+        Annotation::new(0, "f1 origin", FeatureKind::Domain, 610, 1045)
+            .with_strand(Strand::Forward)
+            .with_notes("f1 bacteriophage origin of single-stranded DNA replication."),
+    );
+    aln.add_annotation(
+        Annotation::new(0, "Kanamycin", FeatureKind::Cds, 1320, 2090)
+            .with_strand(Strand::Forward)
+            .with_notes("Kanamycin/Neomycin resistance phosphotransferase (NeoR/KanR).")
+            .with_uniprot(UniProtLink::new("P00552").with_metadata("KKA2_KLEPN", "Aminoglycoside 3'-phosphotransferase", "Klebsiella pneumoniae")),
+    );
+    aln.add_annotation(
+        Annotation::new(0, "Ampicillin", FeatureKind::Cds, 2150, 3010)
+            .with_strand(Strand::Reverse)
+            .with_notes("Beta-lactamase conferring ampicillin resistance (AmpR).")
+            .with_uniprot(UniProtLink::new("P62593").with_metadata("BLAT_ECOLX", "Beta-lactamase TEM", "Escherichia coli")),
+    );
+    aln.add_annotation(
+        Annotation::new(0, "pUC origin", FeatureKind::Domain, 3180, 3850)
+            .with_strand(Strand::Forward)
+            .with_notes("High-copy pUC/ColE1 origin of replication in E. coli."),
+    );
+
+    aln
+}
+
+/// Gateway destination expression vector `pDEST15` (2,800 bp compact representation).
+fn build_pdest15_vector() -> Alignment {
+    let t7 = b"TAATACGACTCACTATAGGGGGGCCACCATGGCATCACCATCACCATCAC";
+    let att1 = b"ACAAGTTTGTACAAAAAAGCAGGCT";
+    let att2 = b"ACCCAGCTTTCTTGTACAAAGTGGT";
+    let amp = b"ATGAGTATTCAACATTTCCGTGTCGCCCTTATTCCCTTTTTTGCGGCATTTTGCCTTCCTGTTTTTGCTCACCCAGAAACGCTGGTGAAAGTAAAAGATGCTGAA";
+    let puc = b"TTGAGATCCTTTTTTTCTGCGCGTAATCTGCTGCTTGCAAACAAAAAAACCACCGCTACCAGCGGTGGTTTGTTTGCCGGATCAAGAGCTACCAACTCTTTTTCC";
+
+    let seq = build_plasmid_backbone(
+        2800,
+        108,
+        &[(120, t7), (360, att1), (980, att2), (1400, amp), (2200, puc)],
+    );
+
+    let mut aln = Alignment::new(
+        "pDEST15",
+        Alphabet::Dna,
+        vec![Sequence::new("pDEST15", &seq)
+            .with_description("Gateway N-terminal GST destination expression vector")
+            .with_organism("Synthetic cloning vector")],
+    )
+    .unwrap_or_else(|_| unreachable!("valid plasmid"))
+    .with_description("Gateway destination vector");
+
+    aln.add_annotation(Annotation::new(0, "T7 Promoter", FeatureKind::Motif, 120, 140));
+    aln.add_annotation(Annotation::new(0, "attR1", FeatureKind::BindingSite, 360, 385));
+    aln.add_annotation(Annotation::new(0, "ccdB Counter-Selection", FeatureKind::Gene, 420, 920));
+    aln.add_annotation(Annotation::new(0, "attR2", FeatureKind::BindingSite, 980, 1005));
+    aln.add_annotation(
+        Annotation::new(0, "Ampicillin (AmpR)", FeatureKind::Cds, 1400, 2080)
+            .with_strand(Strand::Reverse)
+            .with_uniprot(UniProtLink::new("P62593")),
+    );
+    aln.add_annotation(Annotation::new(0, "pUC origin", FeatureKind::Domain, 2200, 2700));
+    aln
+}
+
+/// Gateway donor vector `pDONR201` (2,400 bp compact representation).
+fn build_pdonr201_vector() -> Alignment {
+    let attp1 = b"AAATAATGATTTTATTTTGACTGATAGTGACCTGTTCGTTGCAACAAATTGATGAGCAATGCTTTTTTATAATGCCAACTTTGTACAAAAAAGCTGAAC";
+    let attp2 = b"ACCCAGCTTTCTTGTACAAAGTGGT";
+    let kan = b"ATGATTGAACAAGATGGATTGCACGCAGGTTCTCCGGCCGCTTGGGTGGAGAGGCTATTCGGCTATGACTGGGCACAACAGACAATCGGCTGCTCTGATGCCGCC";
+    let puc = b"TTGAGATCCTTTTTTTCTGCGCGTAATCTGCTGCTTGCAAACAAAAAAACCACCGCTACCAGCGGTGGTTTGTTTGCCGGATCAAGAGCTACCAACTCTTTTTCC";
+
+    let seq = build_plasmid_backbone(
+        2400,
+        201,
+        &[(200, attp1), (820, attp2), (1120, kan), (1850, puc)],
+    );
+
+    let mut aln = Alignment::new(
+        "pDONR201",
+        Alphabet::Dna,
+        vec![Sequence::new("pDONR201", &seq)
+            .with_description("Gateway donor vector for BP recombination")
+            .with_organism("Synthetic cloning vector")],
+    )
+    .unwrap_or_else(|_| unreachable!("valid plasmid"))
+    .with_description("Gateway donor vector");
+
+    aln.add_annotation(Annotation::new(0, "attP1", FeatureKind::BindingSite, 200, 299));
+    aln.add_annotation(Annotation::new(0, "ccdB Cassette", FeatureKind::Gene, 340, 780));
+    aln.add_annotation(Annotation::new(0, "attP2", FeatureKind::BindingSite, 820, 845));
+    aln.add_annotation(
+        Annotation::new(0, "Kanamycin (KanR)", FeatureKind::Cds, 1120, 1740)
+            .with_uniprot(UniProtLink::new("P00552")),
+    );
+    aln.add_annotation(Annotation::new(0, "pUC origin", FeatureKind::Domain, 1850, 2320));
+    aln
+}
+
+/// BioBrick RFC 10 standard backbone vector.
+fn build_biobrick_vector() -> Alignment {
+    let prefix = b"GAATTCGCGGCCGCTTCTAGAG";
+    let suffix = b"TACTAGTAGCGGCCGCTGCAG";
+    let puc = b"TTGAGATCCTTTTTTTCTGCGCGTAATCTGCTGCTTGCAAACAAAAAAACCACCGCTACCAGCGGTGGTTTGTTTGCCGGATCAAGAGCTACCAACTCTTTTTCC";
+
+    let seq = build_plasmid_backbone(1800, 10, &[(100, prefix), (420, suffix), (1100, puc)]);
+    let mut aln = Alignment::new(
+        "BioBrick (pSB1C3)",
+        Alphabet::Dna,
+        vec![Sequence::new("pSB1C3", &seq)
+            .with_description("BioBrick RFC 10 standard vector (EcoRI/XbaI/SpeI/PstI)")
+            .with_organism("Synthetic biology part")],
+    )
+    .unwrap_or_else(|_| unreachable!("valid"))
+    .with_description("Enzymes and backbone for BioBrick RFC 10 standard");
+
+    aln.add_annotation(Annotation::new(0, "BioBrick Prefix", FeatureKind::Primer, 100, 122));
+    aln.add_annotation(Annotation::new(0, "RFP Cloning Insert", FeatureKind::Cds, 122, 420));
+    aln.add_annotation(Annotation::new(0, "BioBrick Suffix", FeatureKind::Primer, 420, 441));
+    aln.add_annotation(Annotation::new(0, "CamR Marker", FeatureKind::Gene, 580, 1020));
+    aln.add_annotation(Annotation::new(0, "pUC origin", FeatureKind::Domain, 1100, 1650));
+    aln
+}
+
+/// Overlapping Sanger sequencing reads ready for De Novo Contig Assembly or Reference Mapping.
+fn build_sanger_reads_sample() -> Alignment {
+    let reads = vec![
+        Sequence::new("Read_01_Fwd", b"ATGGTGCATCTGACTCCTGAGGAGAAGTCTGCCGTTACTGCCCTGTGGGGCAAGGTGAACGTGGATGA"),
+        Sequence::new("Read_02_Fwd", b"GTTACTGCCCTGTGGGGCAAGGTGAACGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGT"),
+        Sequence::new("Read_03_Fwd", b"GAAGTTGGTGGTGAGGCCCTGGGCAGGCTGCTGGTGGTCTACCCTTGGACCCAGAGGTTCTTTGAGTC"),
+        Sequence::new("Read_04_Rev", b"AAGGACTCAAAGAACCTCTGGGTCCAAGGGTAGACCACCAGCAGCCTGCCCAGGGCCTCACCACCAAC"),
+    ];
+    Alignment::new("Sanger Reads (HBB Exon 1)", Alphabet::Dna, reads)
+        .unwrap_or_else(|_| unreachable!("valid"))
+        .with_description("4 overlapping Sanger sequencing reads ready for De Novo Contig Assembly")
+}
+
+/// Expression plasmid with GFP insert (ready for Restriction Enzyme or BioBrick cloning).
+fn build_puc_gfp_plasmid() -> Alignment {
+    let gfp_mini = b"GAATTCGCCACCATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTGGACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCCACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCCTGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAGTGCTTCAGCCGCTACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACGTCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCAAGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACGTCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCATCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCCTGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAAAGCTT";
+    let mut aln = Alignment::new(
+        "eGFP_Insert (EcoRI-HindIII)",
+        Alphabet::Dna,
+        vec![Sequence::new("eGFP_CDS", gfp_mini)
+            .with_description("Enhanced GFP coding insert flanked by EcoRI and HindIII")
+            .with_organism("Aequorea victoria (engineered)")
+            .with_uniprot("P42212")],
+    )
+    .unwrap_or_else(|_| unreachable!("valid"))
+    .with_description("eGFP coding insert ready for in-silico cloning (UniProt P42212)");
+
+    aln.add_annotation(
+        Annotation::new(0, "eGFP CDS", FeatureKind::Cds, 12, gfp_mini.len() - 6)
+            .with_notes("Enhanced Green Fluorescent Protein (UniProt P42212 — double-click for AlphaFold 3D beta-barrel!).")
+            .with_uniprot(UniProtLink::new("P42212").with_metadata("GFP_AEQVI", "Green fluorescent protein", "Aequorea victoria")),
+    );
+    aln
+}
+
+/// Sample PCR primer oligos stored in the `Primers` folder.
+fn build_sample_primers() -> Alignment {
+    let seqs = vec![
+        Sequence::new("HBB_Ex1_Fwd", b"ATGGTGCATCTGACTCCTGAGG")
+            .with_description("Forward PCR primer for Human HBB exon 1 (Tm ~61 C)"),
+        Sequence::new("HBB_Ex1_Rev", b"CAGGGCCTCACCACCAACTTCA")
+            .with_description("Reverse PCR primer for Human HBB exon 1 (Tm ~62 C)"),
+    ];
+    Alignment::new("HBB PCR Primer Set", Alphabet::Dna, seqs)
+        .unwrap_or_else(|_| unreachable!("valid"))
+        .with_description("Validated PCR primer pair for human HBB exon 1")
+}
+
+/// Standalone protein record in `Protein Documents`.
+fn build_single_hbb_protein() -> Alignment {
+    let seq = Sequence::new(
+        "HBB_HUMAN",
+        b"MVHLTPEEKSAVTALWGKVNVDEVGGEALGRLLVVYPWTQRFFESFGDLSTPDAVMGNPKVKAHGKKVLGAFSDGLAHLDNLKGTFATLSELHCDKLHVDPENFRLLGNVLVCVLAHHFGKEFTPPVQAAYQKVVAGVANALAHKYH",
+    )
+    .with_description("Hemoglobin subunit beta (UniProt P68871)")
+    .with_organism("Homo sapiens")
+    .with_uniprot("P68871");
+
+    let mut aln = Alignment::new("HBB_HUMAN (P68871)", Alphabet::Protein, vec![seq])
+        .unwrap_or_else(|_| unreachable!("valid"))
+        .with_description("Canonical human hemoglobin subunit beta protein record");
+    aln.add_annotation(
+        Annotation::new(0, "Beta-Globin Fold", FeatureKind::Domain, 1, 147)
+            .with_uniprot(UniProtLink::new("P68871").with_metadata("HBB_HUMAN", "Hemoglobin subunit beta", "Homo sapiens")),
+    );
     aln
 }
 

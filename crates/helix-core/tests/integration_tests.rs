@@ -15,16 +15,15 @@ use helix_core::{
 #[test]
 fn default_workspace_invariants_hold() {
     let docs = build_default_workspace();
-    assert_eq!(docs.len(), 4);
+    assert_eq!(docs.len(), 12);
     for doc in &docs {
         let aln = &doc.alignment;
-        assert!(aln.row_count() >= 4);
-        assert!(aln.width() > 100);
+        assert!(aln.row_count() >= 1);
+        assert!(aln.width() >= 20);
         assert_eq!(aln.columns().len(), aln.width());
         for seq in aln.sequences() {
             assert_eq!(seq.len(), aln.width());
         }
-        assert!(!aln.annotations().is_empty());
         for ann in aln.annotations() {
             assert!(ann.start < ann.end);
             assert!(ann.end <= aln.width());
@@ -32,7 +31,12 @@ fn default_workspace_invariants_hold() {
     }
 
     // Verify circular phage genome produces a valid circular GC profile.
-    let phage = &docs[3].alignment;
+    let phage = docs
+        .iter()
+        .find(|d| d.alignment.name.contains("Bacteriophage"))
+        .expect("phage doc")
+        .alignment
+        .clone();
     let gc = phage
         .circular_gc_profile(72)
         .expect("phage DNA alignment produces circular GC profile");
@@ -47,7 +51,11 @@ fn offline_preview_structure_maps_cleanly_to_hbb_protein_and_dna_cds() {
     assert!(preview.mean_plddt > 75.0);
 
     // Map against HBB protein alignment.
-    let hbb_prot = &docs[0].alignment;
+    let hbb_prot = &docs
+        .iter()
+        .find(|d| d.alignment.name.contains("Hemoglobin Beta Orthologs"))
+        .expect("hbb prot")
+        .alignment;
     let map_prot = StructureAlignmentMap::build(&preview, hbb_prot, hbb_prot.annotations().first());
     assert!(
         map_prot.mapped_count >= 140,
@@ -56,7 +64,11 @@ fn offline_preview_structure_maps_cleanly_to_hbb_protein_and_dna_cds() {
     );
 
     // Map against HBB DNA CDS alignment (444 bp -> 147 aa + stop codon).
-    let hbb_dna = &docs[2].alignment;
+    let hbb_dna = &docs
+        .iter()
+        .find(|d| d.alignment.name.contains("HBB Coding Sequence"))
+        .expect("hbb dna")
+        .alignment;
     let cds_ann = hbb_dna.annotations().first();
     let map_dna = StructureAlignmentMap::build(&preview, hbb_dna, cds_ann);
     assert!(
@@ -67,6 +79,32 @@ fn offline_preview_structure_maps_cleanly_to_hbb_protein_and_dna_cds() {
     // Residue 6 (0-based idx 6, Glu7 / Sickle-cell HbS position) maps to DNA columns 18..21.
     assert_eq!(map_dna.residue_to_cols[6], Some((18, 21)));
     assert_eq!(map_dna.residue_for_column(19), Some(6));
+}
+
+#[test]
+fn editing_extract_rc_and_translate_preserve_invariants() {
+    let mut aln = Alignment::new(
+        "EditTest",
+        Alphabet::Dna,
+        vec![Sequence::new("S1", b"ATGGTGCACCTG")],
+    )
+    .expect("aln");
+    assert!(aln.set_residue(0, 0, b'g'));
+    assert_eq!(aln.sequences()[0].residues[0], b'G');
+    assert!(aln.insert_residue_at(0, 0, b'A'));
+    assert_eq!(aln.width(), 13);
+    assert!(aln.delete_column_at(1));
+    assert_eq!(aln.width(), 12);
+
+    let extracted = aln.extract_region("Sub", 0, 9).expect("extract");
+    assert_eq!(extracted.width(), 9);
+
+    let rc = extracted.reverse_complement_copy().expect("rc");
+    assert_eq!(rc.width(), 9);
+
+    let prot = extracted.translate_to_protein_alignment(0).expect("translate");
+    assert_eq!(prot.alphabet, Alphabet::Protein);
+    assert_eq!(prot.width(), 3);
 }
 
 #[test]

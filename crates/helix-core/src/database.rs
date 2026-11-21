@@ -138,7 +138,7 @@ pub struct AlphaFoldMeta {
     pub cif_url: Option<String>,
 }
 
-fn build_http_agent() -> Result<ureq::Agent> {
+pub(crate) fn build_http_agent() -> Result<ureq::Agent> {
     // `ureq` with `native-tls` (and `default-features = false`) requires explicitly
     // attaching a `native_tls::TlsConnector` so HTTPS (Windows SChannel / macOS / OpenSSL)
     // requests are enabled.

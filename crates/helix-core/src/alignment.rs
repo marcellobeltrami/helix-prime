@@ -221,6 +221,182 @@ impl Alignment {
         self.annotations.iter_mut().find(|a| a.id == id)
     }
 
+    /// Directly replaces a single residue byte in row `row`, column `col` (used by Allow Editing)
+    /// and recomputes column statistics.
+    pub fn set_residue(&mut self, row: usize, col: usize, base: u8) -> bool {
+        let Some(seq) = self.sequences.get_mut(row) else {
+            return false;
+        };
+        let Some(slot) = seq.residues.get_mut(col) else {
+            return false;
+        };
+        *slot = base.to_ascii_uppercase();
+        self.recompute_stats();
+        true
+    }
+
+    /// Inserts a residue at `col` in row `row` (inserting gap `'-'` at `col` in all other rows to
+    /// preserve the rectangular alignment invariant) and shifts downstream annotations cleanly.
+    pub fn insert_residue_at(&mut self, row: usize, col: usize, base: u8) -> bool {
+        if row >= self.sequences.len() || col > self.width {
+            return false;
+        }
+        let ch = base.to_ascii_uppercase();
+        for (r_idx, seq) in self.sequences.iter_mut().enumerate() {
+            seq.residues.insert(col, if r_idx == row { ch } else { b'-' });
+        }
+        self.width = self.width.saturating_add(1);
+        for ann in &mut self.annotations {
+            if ann.start >= col {
+                ann.start = ann.start.saturating_add(1);
+            }
+            if ann.end > col {
+                ann.end = ann.end.saturating_add(1);
+            }
+        }
+        self.recompute_stats();
+        true
+    }
+
+    /// Deletes column `col` across all rows (when `width > 1`) and adjusts overlapping annotations.
+    pub fn delete_column_at(&mut self, col: usize) -> bool {
+        if self.width <= 1 || col >= self.width {
+            return false;
+        }
+        for seq in &mut self.sequences {
+            if col < seq.residues.len() {
+                seq.residues.remove(col);
+            }
+        }
+        self.width -= 1;
+        for ann in &mut self.annotations {
+            if ann.start > col {
+                ann.start -= 1;
+            }
+            if ann.end > col {
+                ann.end = ann.end.saturating_sub(1).max(ann.start + 1);
+            }
+            ann.end = ann.end.min(self.width);
+            ann.start = ann.start.min(ann.end.saturating_sub(1));
+        }
+        self.recompute_stats();
+        true
+    }
+
+    /// Extracts column span `[start, end)` into a new standalone [`Alignment`] carrying over
+    /// all overlapping annotations clipped to the extracted coordinates.
+    pub fn extract_region(&self, new_name: impl Into<String>, start: usize, end: usize) -> Result<Self> {
+        let clamped_end = end.min(self.width);
+        let clamped_start = start.min(clamped_end);
+        if clamped_start >= clamped_end {
+            return Err(HelixError::Alignment(
+                "cannot extract an empty column region".to_owned(),
+            ));
+        }
+
+        let extracted_seqs: Vec<Sequence> = self
+            .sequences
+            .iter()
+            .map(|s| {
+                let mut copy = Sequence::new(s.name.clone(), &s.residues[clamped_start..clamped_end]);
+                copy.description = s.description.clone();
+                copy.organism = s.organism.clone();
+                copy.uniprot_accession = s.uniprot_accession.clone();
+                copy
+            })
+            .collect();
+
+        let mut out = Self::new(new_name, self.alphabet, extracted_seqs)?
+            .with_description(format!(
+                "Extracted region {}..{} from {}",
+                clamped_start + 1,
+                clamped_end,
+                self.name
+            ));
+
+        for ann in &self.annotations {
+            if ann.end > clamped_start && ann.start < clamped_end {
+                let mut sub = ann.clone();
+                sub.start = ann.start.saturating_sub(clamped_start);
+                sub.end = (ann.end.min(clamped_end)) - clamped_start;
+                if sub.start < sub.end {
+                    out.add_annotation(sub);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Produces a reverse-complemented copy of a DNA/RNA alignment, flipping all annotation
+    /// coordinates and strands accordingly.
+    pub fn reverse_complement_copy(&self) -> Result<Self> {
+        if !self.alphabet.is_nucleotide() {
+            return Err(HelixError::Alignment(
+                "reverse complement is only valid for DNA/RNA sequences".to_owned(),
+            ));
+        }
+
+        let rc_seqs: Vec<Sequence> = self
+            .sequences
+            .iter()
+            .map(|s| {
+                let rc = crate::sequence::reverse_complement(&s.residues);
+                let mut copy = Sequence::new(format!("{} (RC)", s.name), &rc);
+                copy.description = s.description.clone();
+                copy.organism = s.organism.clone();
+                copy.uniprot_accession = s.uniprot_accession.clone();
+                copy
+            })
+            .collect();
+
+        let mut out = Self::new(format!("{} (RC)", self.name), self.alphabet, rc_seqs)?
+            .with_description(format!("Reverse complement of {}", self.name));
+
+        let w = self.width;
+        for ann in &self.annotations {
+            let mut flipped = ann.clone();
+            flipped.start = w.saturating_sub(ann.end);
+            flipped.end = w.saturating_sub(ann.start).max(flipped.start + 1);
+            flipped.strand = match ann.strand {
+                crate::sequence::Strand::Forward => crate::sequence::Strand::Reverse,
+                crate::sequence::Strand::Reverse => crate::sequence::Strand::Forward,
+            };
+            out.add_annotation(flipped);
+        }
+        Ok(out)
+    }
+
+    /// Translates the primary nucleotide sequence in reading frame `frame` (`0..=2`) into a
+    /// standalone Protein [`Alignment`].
+    pub fn translate_to_protein_alignment(&self, frame: usize) -> Result<Self> {
+        if !self.alphabet.is_nucleotide() {
+            return Err(HelixError::Alignment(
+                "translation is only valid for DNA/RNA alignments".to_owned(),
+            ));
+        }
+        let mut prot_seqs = Vec::with_capacity(self.sequences.len());
+        for seq in &self.sequences {
+            let ungapped = seq.ungapped_bytes();
+            let aa = crate::sequence::translate_ungapped(&ungapped, frame);
+            if !aa.is_empty() {
+                let mut p = Sequence::new(format!("{} (F+{})", seq.name, (frame % 3) + 1), &aa);
+                p.organism = seq.organism.clone();
+                p.uniprot_accession = seq.uniprot_accession.clone();
+                prot_seqs.push(p);
+            }
+        }
+        if prot_seqs.is_empty() {
+            return Err(HelixError::Alignment(
+                "sequence is too short to translate any codons".to_owned(),
+            ));
+        }
+        Self::new(
+            format!("{} (Translation +{})", self.name, (frame % 3) + 1),
+            Alphabet::Protein,
+            prot_seqs,
+        )
+    }
+
     /// Computes mean pairwise identity across the entire alignment (`0.0..=100.0`).
     #[must_use]
     pub fn mean_pairwise_identity_pct(&self) -> f32 {

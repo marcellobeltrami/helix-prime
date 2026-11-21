@@ -1,4 +1,4 @@
-# 🧬 HelixPrime
+# HelixPrime
 
 An open-source, native Rust alignment inspection and 3D protein visualization suite inspired by **Geneious Prime**, combining high-FPS multiple sequence alignment analysis with live **UniProtKB** annotation lookup and a **separate-window 3D Protein Viewer** connected to the **AlphaFold Protein Structure Database (EBI)** and **RCSB PDB**.
 

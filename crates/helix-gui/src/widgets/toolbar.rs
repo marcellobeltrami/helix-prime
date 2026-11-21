@@ -1,160 +1,168 @@
-//! Top Geneious Prime-inspired ribbon toolbar with file import/export, progressive alignment,
-//! annotation creation, zoom controls, theme toggle, and separate 3D Protein Window launcher.
+//! Top Geneious Prime-inspired toolbar with Back/Forward history, Add, Export, BLAST,
+//! Workflows, Align/Assemble, Tree, Primers, Cloning, Phage Circular, 3D Viewer, Dark Mode,
+//! and right-aligned Search Everywhere.
 
-use crate::app::{HelixApp, InspectorTab, ViewMode};
+use crate::app::{HelixApp, SourceSelection};
 use crate::theme::{Palette, ThemeMode};
 use egui::{Button, Color32, Context, RichText, Ui};
 
-/// Renders the main application toolbar.
+/// Renders the main application ribbon toolbar matching the Geneious Prime interface.
 pub fn show_toolbar(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) {
     let pal = Palette::for_mode(app.theme);
 
     ui.horizontal_centered(|ui| {
-        // Brand badge.
-        ui.label(
-            RichText::new("HelixPrime")
-                .strong()
-                .size(16.0)
-                .color(pal.accent),
-        );
-        ui.separator();
-
-        // Sidebar visibility toggles.
+        // Back / Forward document history navigation.
+        let can_back = app.history_pos > 0;
+        let can_fwd = app.history_pos + 1 < app.history.len();
         if ui
-            .selectable_label(app.show_sources_panel, "Sources")
-            .on_hover_text("Toggle left Sources & Documents browser")
+            .add_enabled(can_back, Button::new("←"))
+            .on_hover_text("Back to previous document")
             .clicked()
         {
-            app.show_sources_panel = !app.show_sources_panel;
+            app.navigate_back();
         }
         if ui
-            .selectable_label(app.show_inspector_panel, "Inspector")
-            .on_hover_text("Toggle right Display, Annotations & UniProt inspector")
+            .add_enabled(can_fwd, Button::new("→"))
+            .on_hover_text("Forward to next document")
             .clicked()
         {
-            app.show_inspector_panel = !app.show_inspector_panel;
+            app.navigate_forward();
         }
         ui.separator();
 
-        // File I/O actions.
+        // Add / Export dropdown-style quick actions.
+        ui.menu_button(RichText::new("+ Add").strong(), |ui| {
+            if ui.button("Import Sequence / Alignment (FASTA, Clustal, GenBank)...").clicked() {
+                app.import_alignment_dialog();
+                ui.close_menu();
+            }
+            if ui.button("Import GFF3 Annotations onto Active Document...").clicked() {
+                app.import_gff3_dialog();
+                ui.close_menu();
+            }
+            if ui.button("Load Local 3D Structure (PDB / mmCIF)...").clicked() {
+                app.load_local_structure_dialog();
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("New Annotation on Current Selection...").clicked() {
+                if let Some((s, e)) = app.selected_cols {
+                    app.new_ann_draft.start_1based = s + 1;
+                    app.new_ann_draft.end_1based = e;
+                }
+                app.new_ann_draft.open = true;
+                ui.close_menu();
+            }
+        });
+
         if ui
-            .button("Import...")
-            .on_hover_text("Open FASTA (.fa/.fasta), Clustal (.aln), or GenBank (.gb/.gbk)")
-            .clicked()
-        {
-            app.import_alignment_dialog();
-        }
-        if ui
-            .button("+ GFF3")
-            .on_hover_text("Overlay GFF3 annotations onto the active alignment")
-            .clicked()
-        {
-            app.import_gff3_dialog();
-        }
-        if ui
-            .button("Export...")
-            .on_hover_text("Save active alignment as FASTA or Clustal (.aln)")
+            .button("Export")
+            .on_hover_text("Export active alignment (FASTA/Clustal) or tree (Newick)")
             .clicked()
         {
             app.export_alignment_dialog();
         }
+
         ui.separator();
 
-        // Alignment & Annotation actions.
+        // Core Molecular Biology & Analysis Tools (matching the Geneious Prime toolbar).
         if ui
-            .button("Align (NW)")
-            .on_hover_text("Run progressive Needleman-Wunsch multiple sequence alignment")
+            .button(RichText::new("BLAST").strong())
+            .on_hover_text("Run local workspace BLAST or search NCBI/UniProt")
             .clicked()
         {
-            let res = app
-                .current_doc_mut()
-                .map(|doc| {
-                    let r = doc.alignment.realign_progressive();
-                    if r.is_ok() {
-                        doc.invalidate_caches();
+            if app.blast_modal.query.trim().is_empty() {
+                if let Some(aln) = app.current_alignment() {
+                    if let Some(seq) = aln.sequences().first() {
+                        let (s, e) = app
+                            .selected_cols
+                            .unwrap_or((0, aln.width().min(60)));
+                        let frag = &seq.residues[s.min(seq.len())..e.min(seq.len())];
+                        app.blast_modal.query = String::from_utf8_lossy(frag).into_owned();
                     }
-                    r
-                });
-            match res {
-                Some(Ok(())) => {
-                    app.rebuild_3d_alignment_map();
-                    app.status_message = String::from("Re-aligned sequences using progressive Needleman-Wunsch.");
                 }
-                Some(Err(err)) => {
-                    app.status_message = format!("Alignment failed: {err}");
-                }
-                None => {}
             }
+            app.blast_modal.open = true;
         }
 
         if ui
-            .button("+ Annotation")
-            .on_hover_text("Create a new annotation from the selected column range")
+            .button("Workflows")
+            .on_hover_text("Run automated multi-step bioinformatics pipelines")
             .clicked()
         {
-            if let Some((s, e)) = app.selected_cols {
-                app.new_ann_draft.start_1based = s + 1;
-                app.new_ann_draft.end_1based = e;
-            }
-            app.new_ann_draft.open = true;
+            app.workflow_modal.open = true;
         }
 
         if ui
-            .button("UniProt Search")
-            .on_hover_text("Open UniProtKB lookup drawer to search and link protein annotations")
+            .button("Align/Assemble")
+            .on_hover_text("Multiple sequence alignment, de novo contig assembly, or read mapping")
             .clicked()
         {
-            app.show_inspector_panel = true;
-            app.inspector_tab = InspectorTab::Annotations;
+            app.assemble_modal.open = true;
+        }
+
+        if ui
+            .button("Tree")
+            .on_hover_text("Build UPGMA or Neighbor-Joining phylogenetic tree")
+            .clicked()
+        {
+            app.tree_modal.open = true;
+        }
+
+        if ui
+            .button("Primers")
+            .on_hover_text("Design PCR primer pairs and test primer binding sites")
+            .clicked()
+        {
+            app.primers_modal.open = true;
+        }
+
+        if ui
+            .button(RichText::new("Cloning").strong())
+            .on_hover_text("In-silico Cloning: Restriction Digest, TOPO-TA, Gateway, and BioBrick")
+            .clicked()
+        {
+            app.cloning_modal.open = true;
         }
 
         ui.separator();
 
-        // Prominent Phage / Circular Genome View toggle button.
-        let is_circular = app.view_mode == ViewMode::CircularPhage;
-        let phage_btn = if is_circular {
-            Button::new(
-                RichText::new("Phage Circular: ON")
-                    .strong()
-                    .color(Color32::WHITE),
-            )
-            .fill(Color32::from_rgb(16, 138, 134))
+        // Phage Circular View quick toggle.
+        let is_circular = app.display.show_circular_overview;
+        let phage_btn = if is_circular && !app.display.show_linear_view {
+            Button::new(RichText::new("Phage Circle").strong().color(Color32::WHITE))
+                .fill(Color32::from_rgb(16, 138, 134))
         } else {
-            Button::new(RichText::new("Phage Circular").strong())
+            Button::new(RichText::new("Phage Circle"))
         };
         if ui
             .add(phage_btn)
-            .on_hover_text("Toggle circular phage / plasmid genome ring visualization")
+            .on_hover_text("Toggle full Circular Phage / Plasmid genome ring view")
             .clicked()
         {
-            app.view_mode = if is_circular {
-                ViewMode::Linear
+            if app.display.show_circular_overview && !app.display.show_linear_view {
+                app.display.show_circular_overview = false;
+                app.display.show_linear_view = true;
             } else {
-                ViewMode::CircularPhage
-            };
-            app.status_message = match app.view_mode {
-                ViewMode::Linear => String::from("Switched to Linear Alignment View."),
-                ViewMode::CircularPhage => {
-                    String::from("Switched to Circular Phage Genome Visualization (drag to rotate, scroll to zoom).")
-                }
-            };
+                app.display.show_circular_overview = true;
+                app.display.show_linear_view = false;
+            }
         }
 
-        // Highlighted primary CTA: Launch/Focus the separate native OS 3D Protein Viewer window.
+        // Separate 3D Protein Window CTA.
         let active_acc = find_active_uniprot_accession(app);
         let btn_label = match &app.viewer3d.structure {
-            Some(st) if app.viewer3d.open => format!("3D Window ({})", st.entry_id),
+            Some(st) if app.viewer3d.open => format!("3D ({})", st.entry_id),
             _ => match &active_acc {
-                Some(acc) => format!("View 3D ({acc})"),
-                None => String::from("3D Protein Window"),
+                Some(acc) => format!("3D ({acc})"),
+                None => String::from("3D Viewer"),
             },
         };
-
-        let btn_3d = Button::new(RichText::new(btn_label).strong().color(Color32::WHITE))
-            .fill(pal.accent);
+        let btn_3d =
+            Button::new(RichText::new(btn_label).strong().color(Color32::WHITE)).fill(pal.accent);
         if ui
             .add(btn_3d)
-            .on_hover_text("Open interactive 3D protein viewer in a separate OS window via AlphaFold DB & UniProt")
+            .on_hover_text("Open interactive AlphaFold / UniProt 3D protein viewer in a separate window")
             .clicked()
         {
             if app.viewer3d.structure.is_some() {
@@ -166,66 +174,57 @@ pub fn show_toolbar(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) {
             }
         }
 
-        // Right-aligned zoom and Dark Mode controls.
+        // Right side: Search Everywhere + Dark Mode toggle + Panel toggles.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let is_dark = app.theme == ThemeMode::Dark;
             let theme_btn = if is_dark {
-                Button::new(RichText::new("Light Mode").strong())
+                Button::new(RichText::new("Light").strong())
             } else {
-                Button::new(RichText::new("Dark Mode").strong().color(Color32::WHITE))
+                Button::new(RichText::new("Dark").strong().color(Color32::WHITE))
                     .fill(Color32::from_rgb(42, 52, 68))
             };
             if ui
                 .add(theme_btn)
-                .on_hover_text("Switch between modern Light Mode and Dark Mode")
+                .on_hover_text("Toggle Dark Mode / Light Mode")
                 .clicked()
             {
-                let next = if is_dark {
-                    ThemeMode::Light
-                } else {
-                    ThemeMode::Dark
-                };
-                app.set_theme(ctx, next);
+                app.set_theme(
+                    ctx,
+                    if is_dark {
+                        ThemeMode::Light
+                    } else {
+                        ThemeMode::Dark
+                    },
+                );
             }
 
-            ui.separator();
-
-            if ui.button("+").on_hover_text("Zoom in").clicked() {
-                match app.view_mode {
-                    ViewMode::Linear => {
-                        app.display.col_width = (app.display.col_width + 2.0).min(26.0);
-                    }
-                    ViewMode::CircularPhage => {
-                        app.circular.zoom = (app.circular.zoom * 1.15).min(2.4);
-                    }
-                }
+            if ui
+                .selectable_label(app.show_doc_table, "Table")
+                .on_hover_text("Toggle upper Document Table browser")
+                .clicked()
+            {
+                app.show_doc_table = !app.show_doc_table;
             }
-            let zoom_txt = match app.view_mode {
-                ViewMode::Linear => format!("{:.0}px", app.display.col_width),
-                ViewMode::CircularPhage => format!("{:.0}%", app.circular.zoom * 100.0),
-            };
-            ui.label(
-                RichText::new(zoom_txt)
-                    .small()
-                    .monospace()
-                    .color(pal.text_muted),
+
+            // Global Search Everywhere input (matching top-right of screenshot).
+            let search_resp = ui.add(
+                egui::TextEdit::singleline(&mut app.global_search)
+                    .desired_width(165.0)
+                    .hint_text("Search Everywhere..."),
             );
-            if ui.button("-").on_hover_text("Zoom out").clicked() {
-                match app.view_mode {
-                    ViewMode::Linear => {
-                        app.display.col_width = (app.display.col_width - 2.0).max(4.0);
-                    }
-                    ViewMode::CircularPhage => {
-                        app.circular.zoom = (app.circular.zoom * 0.87).max(0.55);
-                    }
+            if search_resp.changed() && !app.global_search.trim().is_empty() {
+                app.show_doc_table = true;
+                if matches!(
+                    app.source_selection,
+                    SourceSelection::Ncbi(_) | SourceSelection::UniProt | SourceSelection::Operations
+                ) {
+                    app.source_selection = SourceSelection::AllLocal;
                 }
             }
         });
     });
 }
 
-/// Resolves the best UniProt accession for the current selection (selected annotation -> first
-/// UniProt-linked annotation -> first sequence UniProt accession).
 fn find_active_uniprot_accession(app: &HelixApp) -> Option<String> {
     let aln = app.current_alignment()?;
     if let Some(ann_id) = app.selected_annotation_id {

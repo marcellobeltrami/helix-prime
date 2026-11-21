@@ -1,17 +1,18 @@
 //! Right-hand Geneious Prime-inspired Inspector Drawer: Display controls, Annotations &
 //! UniProtKB lookup/3D launcher, Motif search, and Pairwise Identity Statistics.
 
-use crate::app::{HelixApp, InspectorTab, ViewMode};
+use crate::app::{HelixApp, InspectorTab};
 use crate::theme::{ColorScheme, HighlightMode, Palette, ThemeMode};
 use egui::{Button, Color32, Context, Frame, RichText, Rounding, ScrollArea, Stroke, Ui};
 use helix_core::{ConsensusConfig, UniProtLink};
 
-/// Renders the right-hand inspector sidebar with 4 specialized tabs.
+/// Renders the right-hand inspector sidebar with 4 specialized tabs (General/Display,
+/// Annotations & UniProt, Motif Search, and Statistics).
 pub fn show_inspector_panel(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) {
     let pal = Palette::for_mode(app.theme);
 
     ui.horizontal(|ui| {
-        ui.selectable_value(&mut app.inspector_tab, InspectorTab::Display, "Display");
+        ui.selectable_value(&mut app.inspector_tab, InspectorTab::Display, "General");
         ui.selectable_value(
             &mut app.inspector_tab,
             InspectorTab::Annotations,
@@ -31,53 +32,34 @@ pub fn show_inspector_panel(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) {
 }
 
 fn show_display_tab(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette) {
-    section_heading(ui, "APPEARANCE & GENOME TOPOLOGY", pal);
+    // Zoom row matching the top of Geneious Prime's General sidebar (`-`, `+`, `100 %`).
+    ui.horizontal(|ui| {
+        if ui.small_button("-").clicked() {
+            app.display.col_width = (app.display.col_width - 2.0).max(4.0);
+        }
+        let zoom_pct = ((app.display.col_width / 14.0) * 100.0).round();
+        ui.label(RichText::new(format!("{zoom_pct:.0}%")).monospace().strong());
+        if ui.small_button("+").clicked() {
+            app.display.col_width = (app.display.col_width + 2.0).min(26.0);
+        }
+        ui.separator();
+        let mut dark_mode = app.theme == ThemeMode::Dark;
+        if ui.checkbox(&mut dark_mode, "Dark Mode").changed() {
+            app.set_theme(
+                ctx,
+                if dark_mode {
+                    ThemeMode::Dark
+                } else {
+                    ThemeMode::Light
+                },
+            );
+        }
+    });
+    ui.separator();
 
-    let mut dark_mode = app.theme == ThemeMode::Dark;
-    if ui
-        .checkbox(&mut dark_mode, "Dark Mode (Carbon Lab theme)")
-        .changed()
-    {
-        app.set_theme(
-            ctx,
-            if dark_mode {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            },
-        );
-    }
+    section_heading(ui, "COLORS & HIGHLIGHTING", pal);
 
-    let mut phage_circular = app.view_mode == ViewMode::CircularPhage;
-    if ui
-        .checkbox(
-            &mut phage_circular,
-            "Phage Visualization (Circular Genome)",
-        )
-        .on_hover_text("Wrap the active genome alignment into a concentric circular phage/plasmid ring")
-        .changed()
-    {
-        app.view_mode = if phage_circular {
-            ViewMode::CircularPhage
-        } else {
-            ViewMode::Linear
-        };
-    }
-
-    if app.view_mode == ViewMode::CircularPhage {
-        ui.indent("circular_opts", |ui| {
-            ui.checkbox(&mut app.circular.show_labels, "Outer annotation labels");
-            ui.checkbox(&mut app.circular.show_sequence_rings, "Aligned strain rings");
-            ui.checkbox(&mut app.circular.show_identity_ring, "Pairwise identity ring");
-            ui.checkbox(&mut app.circular.show_gc_ring, "GC content ring (DNA/RNA)");
-            ui.add(egui::Slider::new(&mut app.circular.zoom, 0.55..=2.4).text("Circle zoom"));
-        });
-    }
-
-    ui.add_space(10.0);
-    section_heading(ui, "COLORING & HIGHLIGHTING", pal);
-
-    egui::ComboBox::from_label("Color Scheme")
+    egui::ComboBox::from_label("Colors")
         .selected_text(app.display.color_scheme.label())
         .show_ui(ui, |ui| {
             for scheme in ColorScheme::ALL {
@@ -95,33 +77,54 @@ fn show_display_tab(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palett
 
     ui.checkbox(
         &mut app.display.dots_for_matches,
-        "Show dots (.) for consensus matches",
+        "Dots (.) for consensus matches",
     );
 
-    ui.add_space(10.0);
-    section_heading(ui, "VISIBLE TRACKS", pal);
+    ui.add_space(8.0);
+    section_heading(ui, "OVERLAYS", pal);
 
+    ui.checkbox(&mut app.display.show_identity_graph, "Graphs (Identity / GC)");
+    ui.checkbox(&mut app.display.show_annotations, "Annotations");
     ui.checkbox(&mut app.display.show_overview, "Overview minimap");
-    ui.checkbox(&mut app.display.show_identity_graph, "Identity % histogram");
-    ui.checkbox(&mut app.display.show_consensus, "Consensus sequence");
-    ui.checkbox(&mut app.display.show_annotations, "Annotation tracks");
+    ui.checkbox(&mut app.display.show_consensus, "Consensus track");
 
     let is_nuc = app
         .current_alignment()
         .is_some_and(|a| a.alphabet.is_nucleotide());
     if is_nuc {
-        ui.checkbox(&mut app.display.show_translation, "CDS Translation track");
+        ui.checkbox(&mut app.display.show_complement, "Complement strand (3'->5')");
+        ui.checkbox(&mut app.display.show_translation, "Translation");
         if app.display.show_translation {
-            ui.horizontal(|ui| {
-                ui.label("Reading Frame:");
-                ui.radio_value(&mut app.display.translation_frame, 0, "+1");
-                ui.radio_value(&mut app.display.translation_frame, 1, "+2");
-                ui.radio_value(&mut app.display.translation_frame, 2, "+3");
+            ui.indent("trans_frame_opts", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Frame:");
+                    ui.radio_value(&mut app.display.translation_frame, 0, "+1");
+                    ui.radio_value(&mut app.display.translation_frame, 1, "+2");
+                    ui.radio_value(&mut app.display.translation_frame, 2, "+3");
+                });
             });
         }
+        ui.checkbox(&mut app.display.show_restriction_sites, "Restriction Sites");
     }
 
-    ui.add_space(10.0);
+    ui.add_space(8.0);
+    section_heading(ui, "VIEW LAYOUT (PHAGE / LINEAR / WRAP)", pal);
+
+    ui.checkbox(&mut app.display.show_circular_overview, "Circular Overview (Phage / Plasmid)");
+    ui.checkbox(&mut app.display.show_linear_view, "Linear View");
+    ui.checkbox(&mut app.display.wrap_sequence, "Wrap Sequence");
+
+    if app.display.show_circular_overview {
+        ui.indent("circular_opts", |ui| {
+            ui.checkbox(&mut app.circular.show_labels, "Outer feature labels");
+            ui.checkbox(&mut app.circular.show_sequence_rings, "Aligned strain rings");
+            ui.checkbox(&mut app.circular.show_identity_ring, "Pairwise identity ring");
+            ui.checkbox(&mut app.circular.show_gc_ring, "GC content ring");
+            ui.add(egui::Slider::new(&mut app.circular.zoom, 0.55..=2.4).text("Circle zoom"));
+        });
+    }
+
+    ui.add_space(8.0);
     section_heading(ui, "ZOOM & GEOMETRY", pal);
 
     ui.add(
@@ -133,7 +136,7 @@ fn show_display_tab(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palett
             .text("Row height (px)"),
     );
 
-    ui.add_space(10.0);
+    ui.add_space(8.0);
     section_heading(ui, "CONSENSUS CALLING", pal);
 
     if let Some(doc) = app.current_doc_mut() {
