@@ -5,10 +5,11 @@ use crate::alignment::Alignment;
 use crate::annotation::Annotation;
 use crate::error::{HelixError, Result};
 use crate::sequence::{is_gap, three_to_one_aa, translate_aligned_region};
+use serde::{Deserialize, Serialize};
 use std::ops::{Add, Sub};
 
 /// Compact 3D Euclidean vector used for atomic coordinates, normals, and spline control points.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -109,7 +110,7 @@ impl std::ops::Sub for Vec3 {
 }
 
 /// Secondary structure state for a protein residue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum SecondaryStructure {
     Helix,
     Sheet,
@@ -129,7 +130,7 @@ impl SecondaryStructure {
 }
 
 /// Compact atomic coordinate record ordered by alignment to avoid struct padding bloat.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Atom {
     /// 3D Cartesian coordinate in Angstroms.
     pub pos: Vec3,
@@ -156,7 +157,7 @@ impl Atom {
 }
 
 /// Polymer residue in a 3D protein structure, referencing a contiguous slice of [`Atom`]s.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Residue3D {
     /// Index of the first atom belonging to this residue in `ProteinStructure::atoms`.
     pub atom_start: u32,
@@ -191,7 +192,7 @@ impl Residue3D {
 /// # Invariants
 /// - `residues` is non-empty and every `Residue3D::atom_start + atom_count <= atoms.len()`.
 /// - `radius > 0.0` (clamped to at least `1.0` Angstrom so camera framing never divides by zero).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProteinStructure {
     /// Display title (e.g., `"Cellular tumor antigen p53"`).
     pub title: String,

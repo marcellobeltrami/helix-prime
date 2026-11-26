@@ -1084,6 +1084,7 @@ dependencies = [
  "helix-core",
  "rfd",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

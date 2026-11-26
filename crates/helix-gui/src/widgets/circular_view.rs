@@ -7,6 +7,7 @@
 
 use crate::app::{HelixApp, InspectorTab};
 use crate::theme::{residue_colors, HighlightMode, Palette};
+use crate::widgets::context_menu::{self, HoveredAnnotationContext};
 use egui::{
     Align2, Color32, Context, FontId, Frame, Pos2, RichText, Sense, Shape, Stroke, Ui, Vec2,
 };
@@ -590,10 +591,21 @@ fn show_circular_canvas(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Pa
     painter.text(
         Pos2::new(rect.min.x + 12.0, rect.max.y - 10.0),
         Align2::LEFT_BOTTOM,
-        "Drag: Rotate Circle  |  Scroll: Zoom  |  Click: Select Coordinate  |  Double-Click [3D] Arc: Open AlphaFold 3D",
+        "Drag: Rotate  |  Scroll: Zoom  |  Click: Select  |  Right-Click: Quick Tools  |  Double-Click [3D]: AlphaFold 3D",
         FontId::proportional(11.0),
         pal.text_muted,
     );
+
+    // Capture hovered annotation metadata before immutable `aln` borrow ends.
+    let hovered_ann_ctx = hovered_ann_idx
+        .and_then(|idx| aln.annotations().get(idx))
+        .map(|ann| HoveredAnnotationContext {
+            id: ann.id,
+            name: ann.name.clone(),
+            start: ann.start,
+            end: ann.end,
+            uniprot_acc: ann.uniprot.as_ref().map(|u| u.accession.clone()),
+        });
 
     // Floating hover tooltip when hovering an annotation arc.
     if let (Some(ann_idx), Some(ptr)) = (hovered_ann_idx, response.hover_pos()) {
@@ -611,6 +623,16 @@ fn show_circular_canvas(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Pa
     let dbl_click_reset = response.double_clicked() && hovered_ann_idx.is_none();
 
     app.hovered_column = hovered_col;
+
+    if response.secondary_clicked() {
+        if let Some(ref ann) = hovered_ann_ctx {
+            app.selected_annotation_id = Some(ann.id);
+            app.selected_cols = Some((ann.start, ann.end));
+            app.cursor_col = ann.start;
+        } else if let Some(col) = hovered_col {
+            app.cursor_col = col;
+        }
+    }
 
     if dbl_click_reset {
         app.circular.rotation_rad = 0.0;
@@ -640,6 +662,22 @@ fn show_circular_canvas(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Pa
             }
         }
     }
+
+    // Right-click quick-access tool menu on the circular map.
+    response.context_menu(|ui| {
+        let menu_ann = hovered_ann_ctx.clone().or_else(|| {
+            let ann_id = app.selected_annotation_id?;
+            let ann = app.current_alignment()?.annotation_by_id(ann_id)?;
+            Some(HoveredAnnotationContext {
+                id: ann.id,
+                name: ann.name.clone(),
+                start: ann.start,
+                end: ann.end,
+                uniprot_acc: ann.uniprot.as_ref().map(|u| u.accession.clone()),
+            })
+        });
+        context_menu::show_circular_context_menu(app, ctx, ui, hovered_col, menu_ann.as_ref());
+    });
 }
 
 /// Draws a filled 360-degree annular ring using smooth polygonal segments.

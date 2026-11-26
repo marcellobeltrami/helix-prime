@@ -4,6 +4,7 @@
 
 use crate::app::{HelixApp, OperationStatus, SourceSelection};
 use crate::theme::Palette;
+use crate::widgets::context_menu;
 use egui::{Color32, Context, RichText, ScrollArea, Ui};
 use helix_core::features_db::{auto_annotate_from_reference_db, PLASMID_REFERENCE_FEATURES};
 use helix_core::ncbi::NcbiDatabase;
@@ -17,19 +18,20 @@ pub fn show_document_table(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) {
         SourceSelection::Operations => show_operations_table(app, ui, &pal),
         SourceSelection::Ncbi(db) => show_ncbi_table(app, ctx, ui, db, &pal),
         SourceSelection::UniProt => show_uniprot_table(app, ctx, ui, &pal),
-        SourceSelection::DeletedItems => show_local_docs_table(app, ui, &pal, true, false, None),
+        SourceSelection::DeletedItems => show_local_docs_table(app, ctx, ui, &pal, true, false, None),
         SourceSelection::SharedDatabases => {
-            show_local_docs_table(app, ui, &pal, false, true, None);
+            show_local_docs_table(app, ctx, ui, &pal, false, true, None);
         }
-        SourceSelection::AllLocal => show_local_docs_table(app, ui, &pal, false, false, None),
+        SourceSelection::AllLocal => show_local_docs_table(app, ctx, ui, &pal, false, false, None),
         SourceSelection::Folder(folder) => {
-            show_local_docs_table(app, ui, &pal, false, false, Some(folder));
+            show_local_docs_table(app, ctx, ui, &pal, false, false, Some(folder));
         }
     }
 }
 
 fn show_local_docs_table(
     app: &mut HelixApp,
+    ctx: &Context,
     ui: &mut Ui,
     pal: &Palette,
     deleted_only: bool,
@@ -145,6 +147,7 @@ fn show_local_docs_table(
     ui.separator();
 
     let mut select_idx: Option<usize> = None;
+    let mut row_resps: Vec<(usize, egui::Response)> = Vec::with_capacity(matching_indices.len());
 
     ScrollArea::vertical().id_salt("local_doc_table_scroll").show(ui, |ui| {
         egui::Grid::new("local_docs_grid")
@@ -177,15 +180,24 @@ fn show_local_docs_table(
                     };
                     ui.label(RichText::new(type_badge).strong().size(10.0).color(badge_col));
 
-                    if ui
-                        .selectable_label(is_active, RichText::new(&doc.alignment.name).strong().size(12.0))
-                        .clicked()
-                    {
+                    let name_resp = ui.selectable_label(
+                        is_active,
+                        RichText::new(&doc.alignment.name).strong().size(12.0),
+                    );
+                    if name_resp.clicked() {
                         select_idx = Some(idx);
                     }
+                    row_resps.push((idx, name_resp));
 
                     let short_desc: String = doc.alignment.description.chars().take(54).collect();
-                    ui.label(RichText::new(short_desc).size(11.5).color(pal.text_muted));
+                    let desc_resp = ui.add(
+                        egui::Label::new(RichText::new(short_desc).size(11.5).color(pal.text_muted))
+                            .sense(egui::Sense::click()),
+                    );
+                    if desc_resp.clicked() {
+                        select_idx = Some(idx);
+                    }
+                    row_resps.push((idx, desc_resp));
                     ui.label(RichText::new(&doc.modified).size(11.0).color(pal.text_muted));
 
                     let org = doc
@@ -209,6 +221,12 @@ fn show_local_docs_table(
 
     if let Some(idx) = select_idx {
         app.select_document(idx);
+    }
+
+    for (idx, resp) in row_resps {
+        resp.context_menu(|ui| {
+            context_menu::show_document_row_context_menu(app, ctx, ui, idx);
+        });
     }
 }
 

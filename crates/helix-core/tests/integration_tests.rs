@@ -5,7 +5,7 @@
 use helix_core::demo::{build_default_workspace, build_offline_preview_structure};
 use helix_core::io::{
     clustal::parse_clustal, fasta::parse_fasta, genbank::parse_genbank,
-    gff3::import_gff3_annotations,
+    gff3::import_gff3_annotations, mafft::{parse_mafft, MafftFlavor},
 };
 use helix_core::{
     parse_mmcif, parse_pdb, Alignment, Alphabet, Sequence, SecondaryStructure,
@@ -192,4 +192,11 @@ fn sample_data_files_parse_cleanly() {
     let mut fasta_copy = fasta_aln;
     let added = import_gff3_annotations(&mut fasta_copy, gff_str).expect("import sample gff3");
     assert_eq!(added, 5);
+
+    let mafft_str = include_str!("../../../sample_data/phage_capsid_mafft.mafft");
+    let mafft_rep = parse_mafft("sample_mafft", mafft_str).expect("parse sample mafft");
+    assert_eq!(mafft_rep.flavor, MafftFlavor::ClustalOut);
+    assert_eq!(mafft_rep.alignment.row_count(), 4);
+    assert_eq!(mafft_rep.alignment.width(), 120);
+    assert_eq!(mafft_rep.adjusted_direction_count, 1);
 }

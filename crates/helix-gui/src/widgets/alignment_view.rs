@@ -6,6 +6,7 @@
 
 use crate::app::{HelixApp, InspectorTab};
 use crate::theme::{residue_colors, Palette};
+use crate::widgets::context_menu;
 use egui::{
     Align2, Color32, Context, FontId, Frame, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2,
 };
@@ -40,7 +41,7 @@ pub fn show_alignment_view_body(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) 
     }
 
     if app.display.wrap_sequence {
-        show_wrapped_view(app, ui, &pal);
+        show_wrapped_view(app, ctx, ui, &pal);
         return;
     }
 
@@ -151,7 +152,7 @@ fn handle_direct_sequence_editing(app: &mut HelixApp, ctx: &Context) {
 }
 
 /// Renders the multi-line Wrapped Sequence View (`Wrap` checkbox in Geneious Prime).
-fn show_wrapped_view(app: &mut HelixApp, ui: &mut Ui, pal: &Palette) {
+fn show_wrapped_view(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette) {
     let Some(doc) = app.docs.get(app.active_doc) else {
         return;
     };
@@ -165,10 +166,12 @@ fn show_wrapped_view(app: &mut HelixApp, ui: &mut Ui, pal: &Palette) {
     let blocks = width.div_ceil(cols_per_line);
 
     let mut clicked_col: Option<usize> = None;
+    let mut right_clicked_col: Option<usize> = None;
 
-    egui::ScrollArea::vertical()
+    let scroll_out = egui::ScrollArea::vertical()
         .id_salt("wrapped_seq_scroll")
         .show(ui, |ui| {
+            let mut block_resps = Vec::with_capacity(blocks);
             ui.add_space(6.0);
             for block in 0..blocks {
                 let start = block * cols_per_line;
@@ -263,22 +266,36 @@ fn show_wrapped_view(app: &mut HelixApp, ui: &mut Ui, pal: &Palette) {
                     }
                 }
 
-                if resp.clicked() {
+                if resp.clicked() || resp.secondary_clicked() {
                     if let Some(ptr) = resp.interact_pointer_pos() {
                         if ptr.x >= left_x {
                             let local = ((ptr.x - left_x) / col_w) as usize;
                             if local < len {
-                                clicked_col = Some(start + local);
+                                if resp.clicked() {
+                                    clicked_col = Some(start + local);
+                                } else {
+                                    right_clicked_col = Some(start + local);
+                                }
                             }
                         }
                     }
                 }
+                block_resps.push(resp);
             }
+            block_resps
         });
 
     if let Some(col) = clicked_col {
         app.cursor_col = col;
         app.selected_cols = Some((col, col + 1));
+    } else if let Some(col) = right_clicked_col {
+        app.cursor_col = col;
+    }
+
+    for resp in scroll_out.inner {
+        resp.context_menu(|ui| {
+            context_menu::show_sequence_context_menu(app, ctx, ui);
+        });
     }
 }
 
@@ -582,8 +599,9 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
     let mut new_hover_row: Option<usize> = None;
     let mut new_selected_cols: Option<(usize, usize)> = app.selected_cols;
     let mut clicked_col_sync_3d: Option<usize> = None;
+    let mut right_clicked_col: Option<usize> = None;
 
-    egui::ScrollArea::vertical()
+    let scroll_out = egui::ScrollArea::vertical()
         .id_salt("alignment_vertical_scroll")
         .max_height(scroll_area_h)
         .show(ui, |ui| {
@@ -639,6 +657,10 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
                         new_selected_cols = Some((col, col + 1));
                         clicked_col_sync_3d = Some(col);
                     }
+                }
+            } else if response.secondary_clicked() {
+                if let Some(col) = new_hover_col {
+                    right_clicked_col = Some(col);
                 }
             } else if response.dragged() {
                 if let (Some(origin), Some(curr)) = (
@@ -1124,6 +1146,7 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
                 [Pos2::new(data_left, canvas_rect.min.y), Pos2::new(data_left, canvas_rect.max.y)],
                 Stroke::new(1.0, pal.border),
             );
+            response
         });
 
     // --- Custom Horizontal Scrollbar at bottom of alignment canvas ---
@@ -1195,7 +1218,17 @@ fn show_main_grid(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, pal: &Palette)
                 app.viewer3d.selected_residue = Some(res_idx);
             }
         }
+    } else if let Some(col) = right_clicked_col {
+        app.cursor_col = col;
+        if let Some(r) = new_hover_row {
+            app.cursor_row = r;
+        }
     }
+
+    // Right-click quick-access tool menu on the alignment canvas.
+    scroll_out.inner.context_menu(|ui| {
+        context_menu::show_sequence_context_menu(app, ctx, ui);
+    });
 }
 
 fn draw_gutter_label(

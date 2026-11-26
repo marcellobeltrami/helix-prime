@@ -2,13 +2,16 @@
 //! Protein, PubMed, Structure, and Taxonomy searches and FASTA/GenBank downloads.
 
 use crate::alignment::Alignment;
-use crate::database::build_http_agent;
+use crate::database::{build_http_agent, http_get_with_retry};
 use crate::error::{HelixError, Result};
 use crate::io::{fasta::parse_fasta, genbank::parse_genbank};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+const NCBI_CLIENT_PARAMS: &str = "&tool=HelixPrime&email=helixprime@users.noreply.github.com";
+
 /// Public NCBI databases accessible directly from the Sources sidebar (matching Geneious Prime).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NcbiDatabase {
     Gene,
     Genome,
@@ -91,15 +94,12 @@ pub fn search_ncbi(db: NcbiDatabase, query: &str, limit: usize) -> Result<Vec<Nc
     let agent = build_http_agent()?;
 
     let search_url = format!(
-        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db={}&term={}&retmax={retmax}&retmode=json",
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db={}&term={}&retmax={retmax}&retmode=json{NCBI_CLIENT_PARAMS}",
         db.api_name(),
         encode_query(trimmed)
     );
 
-    let search_json: Value = agent
-        .get(&search_url)
-        .call()
-        .map_err(|e| HelixError::database("NCBI", format!("esearch failed: {e}")))?
+    let search_json: Value = http_get_with_retry(&agent, &search_url, Some("application/json"), "NCBI")?
         .into_json()
         .map_err(|e| HelixError::database("NCBI", format!("invalid esearch JSON: {e}")))?;
 
@@ -120,14 +120,11 @@ pub fn search_ncbi(db: NcbiDatabase, query: &str, limit: usize) -> Result<Vec<Nc
 
     let joined_ids = id_list.join(",");
     let summary_url = format!(
-        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db={}&id={joined_ids}&retmode=json",
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db={}&id={joined_ids}&retmode=json{NCBI_CLIENT_PARAMS}",
         db.api_name()
     );
 
-    let sum_json: Value = agent
-        .get(&summary_url)
-        .call()
-        .map_err(|e| HelixError::database("NCBI", format!("esummary failed: {e}")))?
+    let sum_json: Value = http_get_with_retry(&agent, &summary_url, Some("application/json"), "NCBI")?
         .into_json()
         .map_err(|e| HelixError::database("NCBI", format!("invalid esummary JSON: {e}")))?;
 
@@ -203,13 +200,10 @@ pub fn download_ncbi_record(db: NcbiDatabase, uid: &str, fallback_name: &str) ->
     };
 
     let url = format!(
-        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db={}&id={clean_uid}&rettype={rettype}&retmode=text",
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db={}&id={clean_uid}&rettype={rettype}&retmode=text{NCBI_CLIENT_PARAMS}",
         db.api_name()
     );
-    let body = agent
-        .get(&url)
-        .call()
-        .map_err(|e| HelixError::database("NCBI", format!("efetch failed: {e}")))?
+    let body = http_get_with_retry(&agent, &url, None, "NCBI")?
         .into_string()
         .map_err(|e| HelixError::database("NCBI", format!("failed reading efetch body: {e}")))?;
 

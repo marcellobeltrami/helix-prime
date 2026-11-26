@@ -2,21 +2,24 @@
 //! Operations monitor, background NCBI/UniProt/AlphaFold worker orchestration,
 //! and main `eframe::App` update loop including the separate OS 3D viewport window.
 
+use crate::persistence;
 use crate::renderer3d::{Camera3D, ColorBy3D, RenderStyle, Renderer3D};
 use crate::sys_mem::{sample_memory_mb, MemorySnapshot};
 use crate::theme::{apply_theme, ColorScheme, HighlightMode, Palette, ThemeMode};
 use crate::widgets;
 use egui::{Context, ViewportBuilder, ViewportId};
-use helix_core::blast::BlastHit;
+use serde::{Deserialize, Serialize};
+use helix_core::aligners::{AlignerAlgorithm, Minimap2Preset};
+use helix_core::blast::{BlastConfig, BlastHit};
 use helix_core::cloning::CloningMethod;
 use helix_core::database::{
-    fetch_alphafold_structure, fetch_rcsb_pdb, fetch_uniprot_entry, search_uniprot, AlphaFoldMeta,
-    UniProtEntry, UniProtSearchHit,
+    fetch_protein_bundle, fetch_rcsb_pdb, fetch_uniprot_entry, search_uniprot, AlphaFoldMeta,
+    FetchedProteinBundle, ProteinStructureSource, UniProtEntry, UniProtSearchHit,
 };
 use helix_core::demo::{build_default_workspace, build_offline_preview_structure};
 use helix_core::io::{
     clustal::write_clustal, fasta::write_fasta, gff3::import_gff3_annotations,
-    load_alignment_from_path,
+    load_alignment_from_path, mafft::load_mafft_alignment_from_path,
 };
 use helix_core::ncbi::{download_ncbi_record, search_ncbi, NcbiDatabase, NcbiSearchHit};
 use helix_core::phylo::{build_phylogenetic_tree, DistanceModel, PhyloTree, TreeMethod};
@@ -31,7 +34,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Instant;
 
 /// Tracks how a derived document was created from one or more parent documents (Geneious Lineage tab).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LineageEntry {
     pub operation: String,
     pub parent_ids: Vec<u64>,
@@ -107,7 +110,7 @@ impl WorkspaceDoc {
 }
 
 /// Active selection in the left Geneious Prime Sources tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceSelection {
     AllLocal,
     Folder(String),
@@ -120,7 +123,7 @@ pub enum SourceSelection {
 }
 
 /// Active tab inside the lower Document Viewer pane (matching Geneious Prime).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DocTab {
     #[default]
     SequenceView,
@@ -132,7 +135,7 @@ pub enum DocTab {
 }
 
 /// Right-side inspector drawer tabs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum InspectorTab {
     #[default]
     Display,
@@ -142,7 +145,8 @@ pub enum InspectorTab {
 }
 
 /// Interactive camera and track settings for the Circular Overview / Phage Genome ring.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CircularViewState {
     pub rotation_rad: f32,
     pub zoom: f32,
@@ -166,7 +170,8 @@ impl Default for CircularViewState {
 }
 
 /// Visual configuration for the main Sequence View (matching Geneious Prime's General sidebar).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DisplaySettings {
     pub color_scheme: ColorScheme,
     pub highlight_mode: HighlightMode,
@@ -218,7 +223,7 @@ impl Default for DisplaySettings {
 }
 
 /// Background operation lifecycle status shown in the Operations panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationStatus {
     Running,
     Completed,
@@ -226,7 +231,7 @@ pub enum OperationStatus {
 }
 
 /// A single tracked operation in the Operations log.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationRecord {
     pub id: u64,
     pub name: String,
@@ -321,11 +326,19 @@ impl Default for PrimersModalState {
 #[derive(Debug, Clone)]
 pub struct AssembleModalState {
     pub open: bool,
-    pub mode: usize, // 0 = Progressive MSA, 1 = De Novo Contig Assembly, 2 = Map Reads to Reference
+    /// 0 = Multiple Sequence Alignment (De Bruijn / ClustalW / Clustal Omega / MUSCLE / MAFFT / minimap2),
+    /// 1 = De Novo Contig Assembly, 2 = Map Reads to Reference.
+    pub mode: usize,
+    pub algorithm: AlignerAlgorithm,
+    pub minimap2_preset: Minimap2Preset,
+    pub minimap2_custom_path: String,
+    pub gap_open: i32,
+    pub gap_extend: i32,
     pub reference_doc_idx: usize,
     pub reads_doc_idx: usize,
     pub min_overlap: usize,
     pub output_name: String,
+    pub last_note: Option<String>,
     pub error: Option<String>,
 }
 
@@ -333,11 +346,17 @@ impl Default for AssembleModalState {
     fn default() -> Self {
         Self {
             open: false,
-            mode: 1,
+            mode: 0,
+            algorithm: AlignerAlgorithm::ClustalW,
+            minimap2_preset: Minimap2Preset::Asm5,
+            minimap2_custom_path: String::new(),
+            gap_open: 8,
+            gap_extend: 2,
             reference_doc_idx: 6,
             reads_doc_idx: 8,
             min_overlap: 12,
-            output_name: String::from("Assembled_Contig"),
+            output_name: String::from("Aligned_Result"),
+            last_note: None,
             error: None,
         }
     }
@@ -363,10 +382,11 @@ impl Default for TreeModalState {
     }
 }
 
-/// Modal state for Local Workspace BLAST & NCBI Search launcher.
+/// Modal state for Multi-Program BLAST (`totalBLAST`, `blastn`, `blastp`, `blastx`, `tblastn`, `tblastx`, `megablast`).
 #[derive(Debug, Clone, Default)]
 pub struct BlastModalState {
     pub open: bool,
+    pub config: BlastConfig,
     pub query: String,
     pub hits: Vec<BlastHit>,
     pub selected_hit: Option<usize>,
@@ -402,6 +422,8 @@ impl Default for WorkflowModalState {
 pub struct ProteinViewerState {
     pub open: bool,
     pub accession_input: String,
+    /// Selected remote backend for 3D structure & metadata fetching (AlphaFold DB vs UniProtKB).
+    pub source: ProteinStructureSource,
     pub structure: Option<ProteinStructure>,
     pub alphafold_meta: Option<AlphaFoldMeta>,
     pub uniprot_entry: Option<UniProtEntry>,
@@ -422,6 +444,7 @@ impl Default for ProteinViewerState {
         Self {
             open: false,
             accession_input: String::from("P68871"),
+            source: ProteinStructureSource::AutoFallback,
             structure: None,
             alphafold_meta: None,
             uniprot_entry: None,
@@ -452,9 +475,10 @@ pub enum AsyncEvent {
         attach_to_annotation: Option<(usize, u64)>,
         save_as_new_doc: bool,
     },
-    AlphaFoldLoaded {
+    ProteinBundleLoaded {
         op_id: u64,
-        result: Result<(ProteinStructure, AlphaFoldMeta), String>,
+        // Boxed so `AsyncEvent` stays compact on the channel stack (avoids 600+ byte enum padding).
+        result: Result<Box<FetchedProteinBundle>, String>,
         linked_annotation_id: Option<u64>,
     },
     RcsbPdbLoaded {
@@ -547,16 +571,38 @@ pub struct HelixApp {
     pub event_tx: Sender<AsyncEvent>,
     pub event_rx: Receiver<AsyncEvent>,
 
+    /// Timestamp of the last disk session flush to prevent duplicate writes during shutdown.
+    pub last_session_save: Option<Instant>,
+
     pub status_message: String,
 }
 
 impl HelixApp {
-    /// Initializes HelixPrime with the Geneious Prime-inspired workspace (pCRII-TOPO,
-    /// pDEST15, pDONR201, BioBrick, HBB/TP53 alignments, circular Phage genome, primers,
-    /// Sanger reads, and pre-built phylogenetic tree).
+    /// Initializes HelixPrime, restoring the previous user session if present or starting
+    /// fresh in Dark Mode with the built-in Geneious Prime-inspired workspace.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        apply_theme(&cc.egui_ctx, ThemeMode::Light);
+        let mut app = Self::build_fresh_workspace();
 
+        if let Some(saved) = persistence::load_default_session() {
+            let restored = saved.apply_to(&mut app);
+            if restored && app.viewer3d.open && app.viewer3d.structure.is_none() {
+                // Re-populate the 3D viewport when a very large structure wasn't embedded inline.
+                let acc = app.viewer3d.accession_input.clone();
+                if !acc.trim().is_empty() {
+                    app.open_3d_for_accession(&cc.egui_ctx, &acc, app.viewer3d.linked_annotation_id);
+                } else {
+                    app.open_offline_3d_preview();
+                }
+            }
+        }
+
+        apply_theme(&cc.egui_ctx, app.theme);
+        app
+    }
+
+    /// Builds a clean default workspace starting in Dark Mode (pCRII-TOPO, pDEST15, pDONR201,
+    /// BioBrick, HBB/TP53 alignments, circular Phage genome, primers, Sanger reads, and tree).
+    fn build_fresh_workspace() -> Self {
         let (event_tx, event_rx) = mpsc::channel();
         let mut next_doc_id = 1u64;
         let mut docs: Vec<WorkspaceDoc> = build_default_workspace()
@@ -604,7 +650,7 @@ impl HelixApp {
         }
 
         let mut app = Self {
-            theme: ThemeMode::Light,
+            theme: ThemeMode::Dark,
             docs,
             next_doc_id,
             active_doc: 0, // Start on pCRII-TOPO in Cloning (split Circular + Linear view!)
@@ -660,8 +706,9 @@ impl HelixApp {
             viewer3d: ProteinViewerState::default(),
             event_tx,
             event_rx,
+            last_session_save: None,
             status_message: String::from(
-                "Ready — Viewing pCRII-TOPO (Circular Overview + Linear Zoom). Toggle Phage Circular, Dark Mode, or launch 3D AlphaFold.",
+                "Ready — Viewing pCRII-TOPO (Circular Overview + Linear Zoom). Session auto-saves on exit.",
             ),
         };
 
@@ -673,6 +720,44 @@ impl HelixApp {
         }
 
         app
+    }
+
+    /// Persists the current workspace state to disk, updating `last_session_save`.
+    pub fn persist_session(&mut self, force: bool) -> Result<(), String> {
+        if !force {
+            if let Some(last) = self.last_session_save {
+                if last.elapsed().as_millis() < 500 {
+                    return Ok(());
+                }
+            }
+        }
+        let snapshot = persistence::PersistedSession::from_app(self);
+        persistence::save_default_session(&snapshot)?;
+        self.last_session_save = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Explicitly saves the current session and reports status in the footer bar.
+    pub fn save_session_now(&mut self) {
+        match self.persist_session(true) {
+            Ok(()) => {
+                self.status_message = format!(
+                    "Saved workspace session ({} documents).",
+                    self.docs.len()
+                );
+            }
+            Err(err) => {
+                self.status_message = format!("Session save failed: {err}");
+            }
+        }
+    }
+
+    /// Clears saved session state on disk and resets the workspace to factory defaults (Dark Mode).
+    pub fn reset_workspace_to_defaults(&mut self, ctx: &Context) {
+        persistence::clear_default_session();
+        *self = Self::build_fresh_workspace();
+        apply_theme(ctx, self.theme);
+        self.status_message = String::from("Reset workspace to default sample documents (Dark Mode).");
     }
 
     /// Updates Light/Dark theme and applies styling immediately.
@@ -850,11 +935,25 @@ impl HelixApp {
             Some(StructureAlignmentMap::build(structure, aln, linked_ann));
     }
 
-    /// Triggers an asynchronous AlphaFold DB 3D structure fetch + UniProt metadata fetch.
+    /// Triggers an asynchronous 3D protein structure & metadata fetch from the selected source
+    /// (`AlphaFold DB`, `UniProtKB`, or `AutoFallback`) and opens the separate 3D OS window.
     pub fn open_3d_for_accession(
         &mut self,
         ctx: &Context,
         accession: &str,
+        linked_annotation_id: Option<u64>,
+    ) {
+        let source = self.viewer3d.source;
+        self.open_3d_with_source(ctx, accession, source, linked_annotation_id);
+    }
+
+    /// Fetches a 3D protein structure + metadata explicitly from `source` (`AlphaFoldDb`,
+    /// `UniProtDb`, or `AutoFallback`).
+    pub fn open_3d_with_source(
+        &mut self,
+        ctx: &Context,
+        accession: &str,
+        source: ProteinStructureSource,
         linked_annotation_id: Option<u64>,
     ) {
         let clean = accession.trim().to_ascii_uppercase();
@@ -864,45 +963,33 @@ impl HelixApp {
         }
 
         let op_id = self.start_operation(
-            format!("AlphaFold 3D ({clean})"),
-            "Fetching 3D model from AlphaFold DB & metadata from UniProtKB",
+            format!("3D Fetch ({clean})"),
+            format!("Source: {}", source.label()),
         );
 
         self.viewer3d.open = true;
+        self.viewer3d.source = source;
         self.viewer3d.accession_input = clean.clone();
         self.viewer3d.linked_annotation_id = linked_annotation_id;
         self.viewer3d.error_message = None;
         self.viewer3d.loading_message = Some(format!(
-            "Fetching AlphaFold DB 3D model & UniProt record for {clean}..."
+            "Fetching 3D model & metadata for {clean} via {}...",
+            source.label()
         ));
-        self.status_message = format!("Querying AlphaFold DB & UniProtKB for {clean}...");
+        self.status_message = format!("Querying {} for {clean}...", source.label());
 
-        let tx_af = self.event_tx.clone();
-        let ctx_af = ctx.clone();
-        let acc_af = clean.clone();
+        let tx = self.event_tx.clone();
+        let ctx_clone = ctx.clone();
         std::thread::spawn(move || {
-            let result = fetch_alphafold_structure(&acc_af).map_err(|e| e.to_string());
-            let _ = tx_af.send(AsyncEvent::AlphaFoldLoaded {
+            let result = fetch_protein_bundle(&clean, source)
+                .map(Box::new)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AsyncEvent::ProteinBundleLoaded {
                 op_id,
                 result,
                 linked_annotation_id,
             });
-            ctx_af.request_repaint();
-        });
-
-        let tx_up = self.event_tx.clone();
-        let ctx_up = ctx.clone();
-        let acc_up = clean;
-        std::thread::spawn(move || {
-            let entry = fetch_uniprot_entry(&acc_up).map_err(|e| e.to_string());
-            let _ = tx_up.send(AsyncEvent::UniProtEntryLoaded {
-                op_id: 0,
-                entry,
-                import_annotations_for_doc: None,
-                attach_to_annotation: None,
-                save_as_new_doc: false,
-            });
-            ctx_up.request_repaint();
+            ctx_clone.request_repaint();
         });
     }
 
@@ -1051,8 +1138,15 @@ impl HelixApp {
     pub fn import_alignment_dialog(&mut self) {
         let picked: Option<PathBuf> = rfd::FileDialog::new()
             .add_filter(
-                "Bioinformatics Sequences & Alignments",
-                &["fasta", "fa", "fna", "faa", "aln", "clustal", "gb", "gbk"],
+                "Bioinformatics Sequences & Alignments (FASTA, MAFFT, Clustal, PHYLIP, GenBank)",
+                &[
+                    "fasta", "fa", "fna", "faa", "fas", "mafft", "afa", "mfa", "msa", "aln",
+                    "clustal", "clw", "phy", "phylip", "gb", "gbk", "genbank",
+                ],
+            )
+            .add_filter(
+                "Pre-Aligned MAFFT Files",
+                &["mafft", "afa", "mfa", "msa", "aln", "clw", "phy", "phylip", "fasta", "fa"],
             )
             .pick_file();
 
@@ -1063,11 +1157,74 @@ impl HelixApp {
         match load_alignment_from_path(&path) {
             Ok(aln) => {
                 let name = aln.name.clone();
-                self.add_workspace_doc("Imported Files", false, aln, None, None);
-                self.status_message = format!("Imported '{name}' from {}", path.display());
+                let folder = if aln.row_count() > 1 {
+                    "Alignments"
+                } else {
+                    "Imported Files"
+                };
+                self.add_workspace_doc(folder, false, aln, None, None);
+                self.status_message = format!("Imported '{name}' into {folder} from {}", path.display());
             }
             Err(err) => {
                 self.status_message = format!("Import failed: {err}");
+            }
+        }
+    }
+
+    /// Imports an already-aligned MAFFT file (aligned FASTA, `--clustalout`, or `--phylipout`)
+    /// directly into the `Alignments` folder while preserving all gap columns verbatim.
+    pub fn import_mafft_dialog(&mut self) {
+        let picked: Option<PathBuf> = rfd::FileDialog::new()
+            .set_title("Import Pre-Aligned MAFFT Alignment")
+            .add_filter(
+                "MAFFT Pre-Aligned Files (.mafft, .afa, .aln, .phy, .fasta)",
+                &[
+                    "mafft", "afa", "mfa", "msa", "aln", "clustal", "clw", "phy", "phylip",
+                    "fasta", "fa", "fna", "faa", "fas",
+                ],
+            )
+            .pick_file();
+
+        let Some(path) = picked else {
+            return;
+        };
+
+        let op_id = self.start_operation(
+            "Import Pre-Aligned MAFFT",
+            format!("Loading {}", path.display()),
+        );
+
+        match load_mafft_alignment_from_path(&path) {
+            Ok(report) => {
+                let name = report.alignment.name.clone();
+                let rows = report.alignment.row_count();
+                let cols = report.alignment.width();
+                let flavor_label = report.flavor.label();
+                let mut detail = format!(
+                    "Imported {flavor_label} ({rows} sequences, {cols} aligned columns; gaps preserved verbatim)"
+                );
+                if report.adjusted_direction_count > 0 {
+                    detail.push_str(&format!(
+                        "; {} sequence(s) reverse-adjusted (_R_)",
+                        report.adjusted_direction_count
+                    ));
+                }
+                let lineage = LineageEntry {
+                    operation: format!("Import Pre-Aligned MAFFT ({flavor_label})"),
+                    parent_ids: Vec::new(),
+                    parent_names: vec![path.display().to_string()],
+                    details: detail.clone(),
+                };
+                self.add_workspace_doc("Alignments", false, report.alignment, None, Some(lineage));
+                self.finish_operation(op_id, OperationStatus::Completed, detail);
+                self.status_message = format!(
+                    "Imported pre-aligned MAFFT '{name}' ({flavor_label}: {rows} seqs x {cols} cols)."
+                );
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                self.finish_operation(op_id, OperationStatus::Failed, msg.clone());
+                self.status_message = format!("MAFFT import failed: {msg}");
             }
         }
     }
@@ -1300,23 +1457,39 @@ impl HelixApp {
                         self.status_message = format!("UniProt fetch failed: {err}");
                     }
                 },
-                AsyncEvent::AlphaFoldLoaded {
+                AsyncEvent::ProteinBundleLoaded {
                     op_id,
                     result,
                     linked_annotation_id,
                 } => {
                     self.viewer3d.loading_message = None;
                     match result {
-                        Ok((structure, meta)) => {
+                        Ok(boxed_bundle) => {
+                            let bundle = *boxed_bundle;
                             let msg = format!(
-                                "Loaded AlphaFold 3D {} ({} residues, mean pLDDT {:.1})",
-                                meta.entry_id,
-                                structure.residues.len(),
-                                structure.mean_plddt
+                                "Loaded {} via {} ({} residues, {})",
+                                bundle.structure.entry_id,
+                                bundle.structure.source_label,
+                                bundle.structure.residues.len(),
+                                if bundle.structure.is_alphafold {
+                                    format!("mean pLDDT {:.1}", bundle.structure.mean_plddt)
+                                } else {
+                                    format!("{} atoms", bundle.structure.atoms.len())
+                                }
                             );
+                            // Automatically switch coloring to Secondary Structure for experimental X-ray PDBs,
+                            // or AlphaFold pLDDT for AlphaFold models!
+                            if bundle.structure.is_alphafold {
+                                self.viewer3d.color_by = ColorBy3D::AlphaFoldPlddt;
+                            } else if self.viewer3d.color_by == ColorBy3D::AlphaFoldPlddt {
+                                self.viewer3d.color_by = ColorBy3D::SecondaryStructure;
+                            }
                             self.finish_operation(op_id, OperationStatus::Completed, msg.clone());
-                            self.viewer3d.structure = Some(structure);
-                            self.viewer3d.alphafold_meta = Some(meta);
+                            self.viewer3d.structure = Some(bundle.structure);
+                            self.viewer3d.alphafold_meta = bundle.alphafold_meta;
+                            if let Some(up) = bundle.uniprot_entry {
+                                self.viewer3d.uniprot_entry = Some(up);
+                            }
                             self.viewer3d.linked_annotation_id = linked_annotation_id;
                             self.viewer3d.error_message = None;
                             self.viewer3d.camera.reset();
@@ -1326,7 +1499,7 @@ impl HelixApp {
                         Err(err) => {
                             self.finish_operation(op_id, OperationStatus::Failed, err.clone());
                             self.viewer3d.error_message = Some(err.clone());
-                            self.status_message = format!("AlphaFold fetch failed: {err}");
+                            self.status_message = format!("3D structure fetch failed: {err}");
                         }
                     }
                 }
@@ -1694,6 +1867,7 @@ impl eframe::App for HelixApp {
             let viewport_id = ViewportId::from_hash_of("helix_prime_3d_protein_viewport");
             let builder = ViewportBuilder::default()
                 .with_title(window_title)
+                .with_icon(crate::app_window_icon())
                 .with_inner_size([920.0, 680.0])
                 .with_min_inner_size([560.0, 420.0]);
 
@@ -1705,5 +1879,20 @@ impl eframe::App for HelixApp {
                 }
             });
         }
+
+        // Flush state immediately when the main OS window close is requested.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            let _ = self.persist_session(true);
+        }
+    }
+
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        // Called periodically by eframe (~30s) and during shutdown.
+        let _ = self.persist_session(false);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Guarantee a final session flush on close even if eframe's built-in storage is unavailable.
+        let _ = self.persist_session(false);
     }
 }

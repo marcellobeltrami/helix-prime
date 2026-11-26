@@ -8,10 +8,11 @@
 use crate::theme::{conservation_color, cpk_element_color, plddt_color, rainbow_color};
 use egui::{Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke};
 use helix_core::{ProteinStructure, SecondaryStructure, StructureAlignmentMap, Vec3};
+use serde::{Deserialize, Serialize};
 use std::ops::{Add, Sub};
 
 /// 3D molecular representation style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RenderStyle {
     /// Smooth spline ribbon with broad coiled helices, flat arrowed beta-strands, and loop tubes.
     #[default]
@@ -48,7 +49,7 @@ impl RenderStyle {
 }
 
 /// 3D color mapping strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ColorBy3D {
     /// Official DeepMind/EBI AlphaFold pLDDT confidence coloring.
     #[default]
@@ -85,7 +86,7 @@ impl ColorBy3D {
 }
 
 /// Orbital 3D camera with Euler yaw/pitch, screen-space pan, and zoom factor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Camera3D {
     pub yaw: f32,
     pub pitch: f32,

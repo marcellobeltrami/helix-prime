@@ -9,12 +9,48 @@ use crate::annotation::{Annotation, FeatureKind, UniProtLink};
 use crate::error::{HelixError, Result};
 use crate::sequence::is_gap;
 use crate::structure::{parse_mmcif, parse_pdb, ProteinStructure};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 const USER_AGENT: &str = "HelixPrime/0.1 (Open-Source Alignment Inspector)";
+
+/// Remote database source selector for fetching 3D protein structures and metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ProteinStructureSource {
+    /// Fetch 3D model and pLDDT metadata directly from AlphaFold Protein Structure Database (EBI).
+    #[default]
+    AlphaFoldDb,
+    /// Fetch metadata, functional features, and linked experimental PDB (or AFDB fallback) via UniProtKB.
+    UniProtDb,
+    /// Try AlphaFold DB first, automatically falling back to UniProtKB + experimental PDB if unavailable.
+    AutoFallback,
+}
+
+impl ProteinStructureSource {
+    pub const ALL: [Self; 3] = [Self::AlphaFoldDb, Self::UniProtDb, Self::AutoFallback];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::AlphaFoldDb => "AlphaFold DB",
+            Self::UniProtDb => "UniProtKB (PDB / Meta)",
+            Self::AutoFallback => "Auto (AlphaFold / UniProt)",
+        }
+    }
+}
+
+/// Combined result returned when fetching a 3D protein structure + metadata from either
+/// AlphaFold DB or UniProtKB.
+#[derive(Debug, Clone)]
+pub struct FetchedProteinBundle {
+    pub structure: ProteinStructure,
+    pub alphafold_meta: Option<AlphaFoldMeta>,
+    pub uniprot_entry: Option<UniProtEntry>,
+    pub resolved_source: ProteinStructureSource,
+}
 
 /// Summary metadata returned by a UniProtKB search query.
 #[derive(Debug, Clone)]
@@ -29,7 +65,7 @@ pub struct UniProtSearchHit {
 }
 
 /// A curated sequence feature returned by UniProtKB (domain, active site, binding site, etc.).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UniProtFeature {
     pub feature_type: String,
     pub description: String,
@@ -40,7 +76,7 @@ pub struct UniProtFeature {
 }
 
 /// Full UniProtKB protein record with functional annotations and structural cross-references.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UniProtEntry {
     pub accession: String,
     pub entry_name: String,
@@ -126,7 +162,7 @@ impl UniProtEntry {
 }
 
 /// Metadata summary returned by the AlphaFold Protein Structure Database API.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlphaFoldMeta {
     pub entry_id: String,
     pub uniprot_accession: String,
@@ -141,16 +177,59 @@ pub struct AlphaFoldMeta {
 pub(crate) fn build_http_agent() -> Result<ureq::Agent> {
     // `ureq` with `native-tls` (and `default-features = false`) requires explicitly
     // attaching a `native_tls::TlsConnector` so HTTPS (Windows SChannel / macOS / OpenSSL)
-    // requests are enabled.
+    // requests are enabled. `.try_proxy_from_env(true)` respects system HTTP(S)_PROXY settings.
     let tls = native_tls::TlsConnector::new()
         .map_err(|e| HelixError::database("TLS", format!("failed to initialize native TLS: {e}")))?;
 
     Ok(ureq::AgentBuilder::new()
         .tls_connector(Arc::new(tls))
-        .timeout_connect(Duration::from_secs(12))
-        .timeout_read(Duration::from_secs(30))
+        .try_proxy_from_env(true)
+        .timeout_connect(Duration::from_secs(15))
+        .timeout_read(Duration::from_secs(35))
         .user_agent(USER_AGENT)
         .build())
+}
+
+/// Executes an HTTP GET request with automatic retries + short backoff on transient DNS
+/// (`os error 11002` / `WSATRY_AGAIN`), connection resets, or rate-limit (`429`/`503`) responses.
+pub(crate) fn http_get_with_retry(
+    agent: &ureq::Agent,
+    url: &str,
+    accept: Option<&str>,
+    service: &'static str,
+) -> Result<ureq::Response> {
+    const MAX_ATTEMPTS: usize = 3;
+    let mut last_err = String::new();
+
+    for attempt in 0..MAX_ATTEMPTS {
+        let mut req = agent.get(url);
+        if let Some(hdr) = accept {
+            req = req.set("Accept", hdr);
+        }
+        match req.call() {
+            Ok(resp) => return Ok(resp),
+            Err(ureq::Error::Status(code, resp)) => {
+                // Retry only on transient server/rate-limit statuses.
+                let retryable = matches!(code, 429 | 500 | 502 | 503 | 504);
+                let body_hint = resp.status_text().to_owned();
+                last_err = format!("HTTP {code} ({body_hint}) for {url}");
+                if !retryable || attempt + 1 == MAX_ATTEMPTS {
+                    return Err(HelixError::database(service, last_err));
+                }
+            }
+            Err(ureq::Error::Transport(t)) => {
+                last_err = format!("{url}: {t}");
+                if attempt + 1 == MAX_ATTEMPTS {
+                    return Err(HelixError::database(service, last_err));
+                }
+            }
+        }
+        // Exponential backoff: 350ms, then 900ms.
+        let delay_ms = if attempt == 0 { 350 } else { 900 };
+        std::thread::sleep(Duration::from_millis(delay_ms));
+    }
+
+    Err(HelixError::database(service, last_err))
 }
 
 /// Searches UniProtKB by gene name, protein name, or free-text query.
@@ -166,11 +245,7 @@ pub fn search_uniprot(query: &str, limit: usize) -> Result<Vec<UniProtSearchHit>
     );
 
     let agent = build_http_agent()?;
-    let resp = agent
-        .get(&url)
-        .set("Accept", "application/json")
-        .call()
-        .map_err(|e| HelixError::database("UniProt", format!("search request failed: {e}")))?;
+    let resp = http_get_with_retry(&agent, &url, Some("application/json"), "UniProt")?;
 
     let json: Value = resp
         .into_json()
@@ -237,16 +312,7 @@ pub fn fetch_uniprot_entry(accession: &str) -> Result<UniProtEntry> {
     let url = format!("https://rest.uniprot.org/uniprotkb/{clean_acc}.json");
 
     let agent = build_http_agent()?;
-    let resp = agent
-        .get(&url)
-        .set("Accept", "application/json")
-        .call()
-        .map_err(|e| {
-            HelixError::database(
-                "UniProt",
-                format!("failed to fetch accession '{clean_acc}': {e}"),
-            )
-        })?;
+    let resp = http_get_with_retry(&agent, &url, Some("application/json"), "UniProt")?;
 
     let json: Value = resp
         .into_json()
@@ -370,17 +436,7 @@ pub fn fetch_alphafold_structure(accession: &str) -> Result<(ProteinStructure, A
     let clean_acc = sanitize_accession(accession)?;
     let api_url = format!("https://alphafold.ebi.ac.uk/api/prediction/{clean_acc}");
     let agent = build_http_agent()?;
-
-    let resp = agent
-        .get(&api_url)
-        .set("Accept", "application/json")
-        .call()
-        .map_err(|e| {
-            HelixError::database(
-                "AlphaFold DB",
-                format!("prediction lookup for '{clean_acc}' failed: {e}"),
-            )
-        })?;
+    let resp = http_get_with_retry(&agent, &api_url, Some("application/json"), "AlphaFold DB")?;
 
     let json: Value = resp
         .into_json()
@@ -477,6 +533,93 @@ pub fn fetch_alphafold_structure(accession: &str) -> Result<(ProteinStructure, A
     Ok((structure, meta))
 }
 
+/// Fetches a 3D protein structure and metadata from either **AlphaFold DB** or **UniProtKB**
+/// (or automatic fallback between them).
+///
+/// - [`ProteinStructureSource::AlphaFoldDb`]: Downloads the AlphaFold DB v4 model & pLDDT
+///   metadata directly from `alphafold.ebi.ac.uk`, enriching with UniProtKB metadata if reachable.
+/// - [`ProteinStructureSource::UniProtDb`]: Queries UniProtKB first for curated metadata,
+///   functional annotations, and structural cross-references; loads the primary experimental
+///   PDB linked in UniProt (falling back to UniProt's AlphaFoldDB cross-reference if no
+///   experimental PDB exists) and stamps UniProt's curated protein name & organism onto the model.
+/// - [`ProteinStructureSource::AutoFallback`]: Attempts AlphaFold DB first, transparently falling
+///   back to UniProtKB + experimental PDB if AlphaFold DB has no prediction for `accession`.
+pub fn fetch_protein_bundle(
+    accession: &str,
+    source: ProteinStructureSource,
+) -> Result<FetchedProteinBundle> {
+    let clean_acc = sanitize_accession(accession)?;
+
+    match source {
+        ProteinStructureSource::AlphaFoldDb => {
+            let (mut structure, meta) = fetch_alphafold_structure(&clean_acc)?;
+            // Best-effort metadata enrichment from UniProtKB so function & PDB xrefs populate.
+            let uniprot_entry = fetch_uniprot_entry(&clean_acc).ok();
+            if let Some(ref up) = uniprot_entry {
+                if structure.title.is_empty() || structure.title == structure.entry_id {
+                    structure.title = up.protein_name.clone();
+                }
+                if structure.organism.is_none() {
+                    structure.organism = Some(up.organism.clone());
+                }
+            }
+            Ok(FetchedProteinBundle {
+                structure,
+                alphafold_meta: Some(meta),
+                uniprot_entry,
+                resolved_source: ProteinStructureSource::AlphaFoldDb,
+            })
+        }
+        ProteinStructureSource::UniProtDb => {
+            let up = fetch_uniprot_entry(&clean_acc)?;
+            // Prioritize experimental PDB cross-references curated by UniProtKB.
+            let mut loaded_structure: Option<ProteinStructure> = None;
+            let mut af_meta: Option<AlphaFoldMeta> = None;
+
+            for pdb_id in up.pdb_ids.iter().take(3) {
+                if let Ok(mut st) = fetch_rcsb_pdb(pdb_id, Some(up.accession.clone())) {
+                    st.title = format!("{} (UniProt {} / PDB {pdb_id})", up.protein_name, up.accession);
+                    st.organism = Some(up.organism.clone());
+                    st.source_label = format!("UniProtKB -> RCSB PDB ({pdb_id})");
+                    loaded_structure = Some(st);
+                    break;
+                }
+            }
+
+            // If UniProt has no experimental PDB (or download failed), follow UniProt's AlphaFoldDB xref.
+            if loaded_structure.is_none() {
+                let af_acc = up.alphafold_id.as_deref().unwrap_or(&up.accession);
+                let (mut st, meta) = fetch_alphafold_structure(af_acc)?;
+                st.title = format!("{} (UniProt {})", up.protein_name, up.accession);
+                st.organism = Some(up.organism.clone());
+                st.source_label = format!("UniProtKB -> AlphaFold DB v{}", meta.latest_version);
+                loaded_structure = Some(st);
+                af_meta = Some(meta);
+            }
+
+            let structure = loaded_structure.ok_or_else(|| {
+                HelixError::database(
+                    "UniProt",
+                    format!("UniProt entry '{}' has no downloadable PDB or AlphaFold 3D structure", up.accession),
+                )
+            })?;
+
+            Ok(FetchedProteinBundle {
+                structure,
+                alphafold_meta: af_meta,
+                uniprot_entry: Some(up),
+                resolved_source: ProteinStructureSource::UniProtDb,
+            })
+        }
+        ProteinStructureSource::AutoFallback => {
+            match fetch_protein_bundle(&clean_acc, ProteinStructureSource::AlphaFoldDb) {
+                Ok(bundle) => Ok(bundle),
+                Err(_) => fetch_protein_bundle(&clean_acc, ProteinStructureSource::UniProtDb),
+            }
+        }
+    }
+}
+
 /// Fetches an experimental 3D structure directly from RCSB PDB by 4-character PDB ID.
 pub fn fetch_rcsb_pdb(pdb_id: &str, accession: Option<String>) -> Result<ProteinStructure> {
     let clean = pdb_id.trim().to_ascii_uppercase();
@@ -509,10 +652,7 @@ fn fetch_text_cached(
         }
     }
 
-    let resp = agent
-        .get(url)
-        .call()
-        .map_err(|e| HelixError::database(service, format!("download from {url} failed: {e}")))?;
+    let resp = http_get_with_retry(agent, url, None, service)?;
 
     let text = resp
         .into_string()

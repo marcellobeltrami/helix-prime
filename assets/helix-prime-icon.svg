@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Deep cohesive forest-emerald squircle backdrop (fits HelixPrime Dark Mode) -->
+    <linearGradient id="squircleBg" x1="15%" y1="8%" x2="85%" y2="94%">
+      <stop offset="0%" stop-color="#1C5B52"/>
+      <stop offset="52%" stop-color="#144840"/>
+      <stop offset="100%" stop-color="#0D342E"/>
+    </linearGradient>
+
+    <!-- Subtle top glass highlight -->
+    <linearGradient id="topSheen" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#7AF2E2" stop-opacity="0.16"/>
+      <stop offset="42%" stop-color="#7AF2E2" stop-opacity="0.02"/>
+      <stop offset="100%" stop-color="#051714" stop-opacity="0.22"/>
+    </linearGradient>
+
+    <!-- Luminous mint-teal DNA glyph gradient -->
+    <linearGradient id="helixFill" x1="18%" y1="8%" x2="82%" y2="92%">
+      <stop offset="0%" stop-color="#4CE0CC"/>
+      <stop offset="50%" stop-color="#35BEB0"/>
+      <stop offset="100%" stop-color="#25A399"/>
+    </linearGradient>
+
+    <!-- Soft drop shadow under helix for depth -->
+    <filter id="helixShadow" x="-15%" y="-15%" width="130%" height="135%">
+      <feDropShadow dx="0" dy="8" stdDeviation="9" flood-color="#051A17" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <!-- Rounded squircle app badge -->
+  <rect x="24" y="24" width="464" height="464" rx="136" ry="136"
+        fill="url(#squircleBg)"/>
+  <rect x="27" y="27" width="458" height="458" rx="133" ry="133"
+        fill="url(#topSheen)" stroke="#62E8D6" stroke-opacity="0.20" stroke-width="5"/>
+
+  <!-- Centered minimalist vertical DNA double helix with signature asymmetric rungs -->
+  <g filter="url(#helixShadow)" fill="none" stroke="url(#helixFill)" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Left-to-right S-strand (top-left -> center -> bottom-right) -->
+    <path d="M 164 102 C 164 202, 206 232, 256 256 C 306 280, 348 310, 348 410"
+          stroke-width="34"/>
+    <!-- Right-to-left S-strand (top-right -> center -> bottom-left) -->
+    <path d="M 348 102 C 348 202, 306 232, 256 256 C 206 280, 164 310, 164 410"
+          stroke-width="34"/>
+
+    <!-- Top split base-pair rung: longer left half, shorter right half -->
+    <line x1="168" y1="142" x2="250" y2="142" stroke-width="28"/>
+    <line x1="296" y1="142" x2="344" y2="142" stroke-width="28"/>
+
+    <!-- Upper-middle bar attached to right strand -->
+    <line x1="238" y1="196" x2="328" y2="196" stroke-width="28"/>
+
+    <!-- Lower-middle bar attached to left strand -->
+    <line x1="184" y1="316" x2="274" y2="316" stroke-width="28"/>
+
+    <!-- Bottom split base-pair rung: shorter left half, longer right half -->
+    <line x1="168" y1="370" x2="216" y2="370" stroke-width="28"/>
+    <line x1="262" y1="370" x2="344" y2="370" stroke-width="28"/>
+  </g>
+</svg>

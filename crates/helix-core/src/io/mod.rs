@@ -4,6 +4,7 @@ pub mod clustal;
 pub mod fasta;
 pub mod genbank;
 pub mod gff3;
+pub mod mafft;
 
 use crate::alignment::Alignment;
 use crate::error::{HelixError, Result};
@@ -15,6 +16,8 @@ pub enum AlignmentFormat {
     Fasta,
     Clustal,
     GenBank,
+    Mafft,
+    Phylip,
 }
 
 /// Auto-detects format from file extension or leading content and loads an [`Alignment`].
@@ -31,25 +34,48 @@ pub fn load_alignment_from_path(path: &Path) -> Result<Alignment> {
         AlignmentFormat::Fasta => fasta::parse_fasta(doc_name, &content),
         AlignmentFormat::Clustal => clustal::parse_clustal(doc_name, &content),
         AlignmentFormat::GenBank => genbank::parse_genbank(doc_name, &content),
+        AlignmentFormat::Mafft => mafft::parse_mafft(doc_name, &content).map(|r| r.alignment),
+        AlignmentFormat::Phylip => mafft::parse_phylip(doc_name, &content),
     }
 }
 
-/// Detects sequence/alignment format from extension first, falling back to content sniffing.
+/// Detects sequence/alignment format using content-aware sniffing paired with file extensions
+/// (so e.g. a MAFFT aligned FASTA saved as `.aln` or `.mafft` still parses cleanly).
 pub fn detect_format(path: &Path, content: &str) -> Result<AlignmentFormat> {
+    let first_line = content.lines().map(str::trim).find(|l| !l.is_empty());
+
+    // First check unambiguous content headers (critical when MAFFT FASTA output is saved as `.aln`).
+    if let Some(line) = first_line {
+        let upper = line.to_ascii_uppercase();
+        if upper.starts_with("CLUSTAL") && upper.contains("MAFFT") {
+            return Ok(AlignmentFormat::Mafft);
+        }
+        if upper.starts_with("LOCUS") {
+            return Ok(AlignmentFormat::GenBank);
+        }
+    }
+
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         match ext.to_ascii_lowercase().as_str() {
+            "mafft" | "afa" | "mfa" | "msa" => return Ok(AlignmentFormat::Mafft),
+            "phy" | "phylip" => return Ok(AlignmentFormat::Phylip),
             "fa" | "fasta" | "fna" | "faa" | "fas" => return Ok(AlignmentFormat::Fasta),
-            "aln" | "clustal" => return Ok(AlignmentFormat::Clustal),
+            "aln" | "clustal" | "clw" => {
+                // Researchers often redirect default MAFFT FASTA output to `*.aln`; sniff leading `>`.
+                if first_line.is_some_and(|l| l.starts_with('>')) {
+                    return Ok(AlignmentFormat::Mafft);
+                }
+                if first_line.is_some_and(|l| mafft::parse_phylip_header(l).is_some()) {
+                    return Ok(AlignmentFormat::Phylip);
+                }
+                return Ok(AlignmentFormat::Clustal);
+            }
             "gb" | "gbk" | "genbank" => return Ok(AlignmentFormat::GenBank),
             _ => {}
         }
     }
 
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+    if let Some(trimmed) = first_line {
         if trimmed.starts_with('>') {
             return Ok(AlignmentFormat::Fasta);
         }
@@ -60,12 +86,14 @@ pub fn detect_format(path: &Path, content: &str) -> Result<AlignmentFormat> {
         if upper.starts_with("LOCUS") {
             return Ok(AlignmentFormat::GenBank);
         }
-        break;
+        if mafft::parse_phylip_header(trimmed).is_some() {
+            return Ok(AlignmentFormat::Phylip);
+        }
     }
 
     Err(HelixError::parse(
         "AutoDetect",
         None,
-        "unrecognized alignment format (expected FASTA, Clustal .aln, or GenBank .gb/.gbk)",
+        "unrecognized alignment format (expected MAFFT .mafft/.afa/.aln/.phy, FASTA, Clustal, PHYLIP, or GenBank)",
     ))
 }

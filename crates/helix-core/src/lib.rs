@@ -2,6 +2,7 @@
 //! cloning simulator, primer designer, phylogenetic trees, local BLAST, NCBI & UniProt/AlphaFold
 //! REST clients, and 3D protein structure mapping engine.
 
+pub mod aligners;
 pub mod alignment;
 pub mod annotation;
 pub mod assembly;
@@ -19,14 +20,19 @@ pub mod restriction;
 pub mod sequence;
 pub mod structure;
 
+pub use aligners::{
+    detect_minimap2_binary, parse_sam_into_alignment, run_alignment_algorithm, AlignerAlgorithm,
+    AlignerConfig, AlignmentRunOutput, Minimap2Preset,
+};
 pub use alignment::{Alignment, ColumnStats, ConsensusConfig, MotifHit};
 pub use annotation::{pack_annotation_lanes, Annotation, FeatureKind, UniProtLink};
 pub use assembly::{assemble_contigs_denovo, map_reads_to_reference};
-pub use blast::{run_local_blast, BlastHit};
+pub use blast::{run_blast, run_local_blast, BlastConfig, BlastHit, BlastProgram};
 pub use cloning::{simulate_cloning, CloningMethod, CloningOutcome, CloningRequest};
 pub use database::{
-    fetch_alphafold_structure, fetch_rcsb_pdb, fetch_uniprot_entry, search_uniprot, AlphaFoldMeta,
-    UniProtEntry, UniProtFeature, UniProtSearchHit,
+    fetch_alphafold_structure, fetch_protein_bundle, fetch_rcsb_pdb, fetch_uniprot_entry,
+    search_uniprot, AlphaFoldMeta, FetchedProteinBundle, ProteinStructureSource, UniProtEntry,
+    UniProtFeature, UniProtSearchHit,
 };
 pub use error::{HelixError, Result};
 pub use features_db::{

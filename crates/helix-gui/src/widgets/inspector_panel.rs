@@ -4,7 +4,7 @@
 use crate::app::{HelixApp, InspectorTab};
 use crate::theme::{ColorScheme, HighlightMode, Palette, ThemeMode};
 use egui::{Button, Color32, Context, Frame, RichText, Rounding, ScrollArea, Stroke, Ui};
-use helix_core::{ConsensusConfig, UniProtLink};
+use helix_core::{ConsensusConfig, ProteinStructureSource, UniProtLink};
 
 /// Renders the right-hand inspector sidebar with 4 specialized tabs (General/Display,
 /// Annotations & UniProt, Motif Search, and Statistics).
@@ -159,7 +159,7 @@ fn show_annotations_uniprot_tab(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, 
     section_heading(ui, "ALIGNMENT ANNOTATIONS", pal);
 
     let mut select_ann: Option<(u64, usize, usize)> = None;
-    let mut launch_3d: Option<(String, Option<u64>)> = None;
+    let mut launch_3d: Option<(String, ProteinStructureSource, Option<u64>)> = None;
     let mut fetch_uniprot_feats: Option<(String, Option<u64>)> = None;
     let mut delete_ann_id: Option<u64> = None;
 
@@ -306,15 +306,37 @@ fn show_annotations_uniprot_tab(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, 
                             }
 
                             ui.add_space(6.0);
-                            let open_btn = Button::new(
-                                RichText::new(format!("View 3D in AlphaFold ({})", up.accession))
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            )
-                            .fill(Color32::from_rgb(16, 138, 134));
-                            if ui.add_sized([ui.available_width(), 28.0], open_btn).clicked() {
-                                launch_3d = Some((up.accession.clone(), Some(ann.id)));
-                            }
+                            ui.horizontal(|ui| {
+                                let af_btn = Button::new(
+                                    RichText::new("3D: AlphaFold DB")
+                                        .small()
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(Color32::from_rgb(16, 138, 134));
+                                if ui.add(af_btn).clicked() {
+                                    launch_3d = Some((
+                                        up.accession.clone(),
+                                        ProteinStructureSource::AlphaFoldDb,
+                                        Some(ann.id),
+                                    ));
+                                }
+
+                                let up_btn = Button::new(
+                                    RichText::new("3D: UniProtKB")
+                                        .small()
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(pal.accent);
+                                if ui.add(up_btn).clicked() {
+                                    launch_3d = Some((
+                                        up.accession.clone(),
+                                        ProteinStructureSource::UniProtDb,
+                                        Some(ann.id),
+                                    ));
+                                }
+                            });
 
                             ui.add_space(4.0);
                             if ui
@@ -345,8 +367,8 @@ fn show_annotations_uniprot_tab(app: &mut HelixApp, ctx: &Context, ui: &mut Ui, 
         app.selected_annotation_id = None;
     }
 
-    if let Some((acc, ann_id)) = launch_3d {
-        app.open_3d_for_accession(ctx, &acc, ann_id);
+    if let Some((acc, src, ann_id)) = launch_3d {
+        app.open_3d_with_source(ctx, &acc, src, ann_id);
     }
 
     if let Some((acc, ann_id)) = fetch_uniprot_feats {

@@ -32,8 +32,12 @@ pub fn show_toolbar(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) {
 
         // Add / Export dropdown-style quick actions.
         ui.menu_button(RichText::new("+ Add").strong(), |ui| {
-            if ui.button("Import Sequence / Alignment (FASTA, Clustal, GenBank)...").clicked() {
+            if ui.button("Import Sequence / Alignment (FASTA, Clustal, PHYLIP, GenBank)...").clicked() {
                 app.import_alignment_dialog();
+                ui.close_menu();
+            }
+            if ui.button("Import Pre-Aligned MAFFT File (.mafft, .afa, .aln, .phy)...").clicked() {
+                app.import_mafft_dialog();
                 ui.close_menu();
             }
             if ui.button("Import GFF3 Annotations onto Active Document...").clicked() {
@@ -51,6 +55,15 @@ pub fn show_toolbar(app: &mut HelixApp, ctx: &Context, ui: &mut Ui) {
                     app.new_ann_draft.end_1based = e;
                 }
                 app.new_ann_draft.open = true;
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Save Session Now").clicked() {
+                app.save_session_now();
+                ui.close_menu();
+            }
+            if ui.button("Reset Workspace to Defaults").clicked() {
+                app.reset_workspace_to_defaults(ctx);
                 ui.close_menu();
             }
         });

@@ -4,10 +4,12 @@
 use crate::app::HelixApp;
 use crate::renderer3d::{ColorBy3D, RenderHighlights, RenderStyle};
 use crate::theme::{plddt_color, Palette};
+use crate::widgets::context_menu;
 use egui::{
     Align2, Button, Color32, Context, FontId, Frame, Pos2, RichText, Rounding, ScrollArea, Sense,
     Stroke, Ui,
 };
+use helix_core::ProteinStructureSource;
 
 /// Renders the complete UI of the separate 3D Protein Viewer OS window.
 pub fn show_protein_window(app: &mut HelixApp, vp_ctx: &Context) {
@@ -23,17 +25,27 @@ pub fn show_protein_window(app: &mut HelixApp, vp_ctx: &Context) {
         )
         .show(vp_ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("UniProt:").strong());
+                ui.label(RichText::new("Accession:").strong());
                 let acc_edit = ui.add(
                     egui::TextEdit::singleline(&mut app.viewer3d.accession_input)
-                        .desired_width(86.0)
+                        .desired_width(82.0)
                         .hint_text("P68871"),
                 );
                 let mut trigger_fetch =
                     acc_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
+                // Explicit source selector: AlphaFold DB vs UniProtKB vs Auto fallback.
+                egui::ComboBox::from_id_salt("source_3d_combo")
+                    .selected_text(app.viewer3d.source.label())
+                    .width(158.0)
+                    .show_ui(ui, |ui| {
+                        for src in ProteinStructureSource::ALL {
+                            ui.selectable_value(&mut app.viewer3d.source, src, src.label());
+                        }
+                    });
+
                 let fetch_btn = Button::new(
-                    RichText::new("Fetch AlphaFold DB")
+                    RichText::new("Fetch 3D")
                         .strong()
                         .color(Color32::WHITE),
                 )
@@ -44,7 +56,35 @@ pub fn show_protein_window(app: &mut HelixApp, vp_ctx: &Context) {
 
                 if trigger_fetch {
                     let acc = app.viewer3d.accession_input.clone();
-                    app.open_3d_for_accession(vp_ctx, &acc, app.selected_annotation_id);
+                    let src = app.viewer3d.source;
+                    app.open_3d_with_source(vp_ctx, &acc, src, app.selected_annotation_id);
+                }
+
+                if ui
+                    .small_button("AlphaFold")
+                    .on_hover_text("Fetch directly from AlphaFold Protein Structure Database (EBI)")
+                    .clicked()
+                {
+                    let acc = app.viewer3d.accession_input.clone();
+                    app.open_3d_with_source(
+                        vp_ctx,
+                        &acc,
+                        ProteinStructureSource::AlphaFoldDb,
+                        app.selected_annotation_id,
+                    );
+                }
+                if ui
+                    .small_button("UniProt")
+                    .on_hover_text("Fetch metadata & linked experimental PDB/model directly from UniProtKB")
+                    .clicked()
+                {
+                    let acc = app.viewer3d.accession_input.clone();
+                    app.open_3d_with_source(
+                        vp_ctx,
+                        &acc,
+                        ProteinStructureSource::UniProtDb,
+                        app.selected_annotation_id,
+                    );
                 }
 
                 if ui
@@ -268,7 +308,7 @@ pub fn show_protein_window(app: &mut HelixApp, vp_ctx: &Context) {
                 painter.text(
                     Pos2::new(rect.min.x + 12.0, rect.max.y - 12.0),
                     Align2::LEFT_BOTTOM,
-                    "Left-Drag: Orbit  |  Right/Shift-Drag: Pan  |  Scroll: Zoom  |  Click Residue: Jump in Alignment",
+                    "Left-Drag: Orbit  |  Right/Shift-Drag: Pan  |  Scroll: Zoom  |  Right-Click: 3D Options  |  Click Residue: Sync Alignment",
                     FontId::proportional(11.0),
                     Color32::from_rgba_unmultiplied(200, 214, 230, 175),
                 );
@@ -303,6 +343,11 @@ pub fn show_protein_window(app: &mut HelixApp, vp_ctx: &Context) {
                     Color32::WHITE,
                 );
             }
+
+            // Right-click quick-access menu (does not interfere with right-drag panning).
+            response.context_menu(|ui| {
+                context_menu::show_3d_viewport_context_menu(app, vp_ctx, ui);
+            });
         });
 }
 

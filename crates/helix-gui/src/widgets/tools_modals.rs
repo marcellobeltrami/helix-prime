@@ -4,8 +4,12 @@
 use crate::app::{DocTab, HelixApp, LineageEntry, OperationStatus};
 use crate::theme::Palette;
 use egui::{Color32, Context, Frame, RichText, ScrollArea, Stroke};
+use helix_core::aligners::{
+    detect_minimap2_binary, run_alignment_algorithm, AlignerAlgorithm, AlignerConfig,
+    Minimap2Preset,
+};
 use helix_core::assembly::{assemble_contigs_denovo, map_reads_to_reference};
-use helix_core::blast::run_local_blast;
+use helix_core::blast::{run_blast, BlastProgram};
 use helix_core::cloning::{simulate_cloning, CloningMethod, CloningRequest};
 use helix_core::features_db::auto_annotate_from_reference_db;
 use helix_core::phylo::{build_phylogenetic_tree, DistanceModel, TreeMethod};
@@ -452,26 +456,134 @@ fn show_assemble_modal(app: &mut HelixApp, ctx: &Context) {
 
     let mut open = app.assemble_modal.open;
     let mut run = false;
+    let mut browse_minimap2 = false;
 
     egui::Window::new("Align / Assemble Sequences")
         .open(&mut open)
         .collapsible(false)
-        .resizable(false)
-        .default_width(460.0)
+        .resizable(true)
+        .default_width(540.0)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.radio_value(&mut app.assemble_modal.mode, 0, "Multiple Align (NW)");
+                ui.radio_value(&mut app.assemble_modal.mode, 0, "Multiple Alignment (MSA / minimap2)");
                 ui.radio_value(&mut app.assemble_modal.mode, 1, "De Novo Contig Assembly");
                 ui.radio_value(&mut app.assemble_modal.mode, 2, "Map to Reference");
             });
             ui.separator();
 
             if app.assemble_modal.mode == 0 {
-                ui.label(
-                    RichText::new("Runs progressive Needleman-Wunsch multiple sequence alignment on the active document.")
-                        .small()
-                        .color(pal.text_muted),
-                );
+                egui::Grid::new("msa_algo_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Alignment Algorithm:");
+                        egui::ComboBox::from_id_salt("msa_algo_cb")
+                            .selected_text(app.assemble_modal.algorithm.label())
+                            .width(310.0)
+                            .show_ui(ui, |ui| {
+                                for alg in AlignerAlgorithm::ALL {
+                                    ui.selectable_value(
+                                        &mut app.assemble_modal.algorithm,
+                                        alg,
+                                        alg.label(),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Input Document:");
+                        let cur_lbl = all_docs
+                            .iter()
+                            .find(|(i, _)| *i == app.active_doc)
+                            .map_or("(Active Document)", |(_, n)| n.as_str());
+                        ui.label(RichText::new(cur_lbl).strong());
+                        ui.end_row();
+
+                        if app.assemble_modal.algorithm == AlignerAlgorithm::Minimap2 {
+                            ui.label("minimap2 Preset (-x):");
+                            egui::ComboBox::from_id_salt("mm2_preset_cb")
+                                .selected_text(app.assemble_modal.minimap2_preset.label())
+                                .width(270.0)
+                                .show_ui(ui, |ui| {
+                                    for p in Minimap2Preset::ALL {
+                                        ui.selectable_value(
+                                            &mut app.assemble_modal.minimap2_preset,
+                                            p,
+                                            p.label(),
+                                        );
+                                    }
+                                });
+                            ui.end_row();
+
+                            ui.label("minimap2 Binary:");
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(
+                                        &mut app.assemble_modal.minimap2_custom_path,
+                                    )
+                                    .desired_width(210.0)
+                                    .hint_text("Auto (PATH / tools/minimap2.exe)"),
+                                );
+                                if ui.small_button("Browse...").clicked() {
+                                    browse_minimap2 = true;
+                                }
+                            });
+                            ui.end_row();
+
+                            let custom = if app.assemble_modal.minimap2_custom_path.trim().is_empty() {
+                                None
+                            } else {
+                                Some(std::path::Path::new(
+                                    app.assemble_modal.minimap2_custom_path.trim(),
+                                ))
+                            };
+                            let detected = detect_minimap2_binary(custom);
+                            ui.label("Engine Status:");
+                            match detected {
+                                Some(p) => {
+                                    ui.label(
+                                        RichText::new(format!("External binary found: {}", p.display()))
+                                            .small()
+                                            .color(pal.identity_high),
+                                    );
+                                }
+                                None => {
+                                    ui.label(
+                                        RichText::new("External minimap2 not on PATH -> uses built-in Rust (w,k) minimizer-chaining engine")
+                                            .small()
+                                            .color(pal.accent),
+                                    );
+                                }
+                            }
+                            ui.end_row();
+                        } else {
+                            ui.label("Gap Open / Extend:");
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::DragValue::new(&mut app.assemble_modal.gap_open)
+                                        .range(2..=20)
+                                        .prefix("Open -"),
+                                );
+                                ui.add(
+                                    egui::DragValue::new(&mut app.assemble_modal.gap_extend)
+                                        .range(1..=10)
+                                        .prefix("Ext -"),
+                                );
+                            });
+                            ui.end_row();
+                        }
+                    });
+
+                let desc = match app.assemble_modal.algorithm {
+                    AlignerAlgorithm::DeBruijn => "Builds a shared k-mer De Bruijn graph to chain collinear unitig anchors and fills variable spans with DP.",
+                    AlignerAlgorithm::ClustalW => "Computes k-mer distances, builds a guide tree, and performs progressive profile-profile alignment.",
+                    AlignerAlgorithm::ClustalOmega => "Uses mBed seed embedding to build the guide tree + conservation-weighted HMM-style profile alignment.",
+                    AlignerAlgorithm::Muscle => "3-stage pipeline: draft progressive MSA -> improved Kimura guide tree -> iterative Sum-of-Pairs refinement.",
+                    AlignerAlgorithm::Mafft => "Physicochemical signal cross-correlation lag guide tree + conservation-weighted iterative refinement.",
+                    AlignerAlgorithm::Minimap2 => "Runs external minimap2 (-a -x preset, parsing SAM CIGAR) if installed, or built-in Rust minimizer-chaining.",
+                };
+                ui.add_space(4.0);
+                ui.label(RichText::new(desc).small().color(pal.text_muted));
             } else if app.assemble_modal.mode == 1 {
                 ui.horizontal(|ui| {
                     ui.label("Reads Document:");
@@ -526,38 +638,82 @@ fn show_assemble_modal(app: &mut HelixApp, ctx: &Context) {
                 });
             }
 
+            if let Some(note) = &app.assemble_modal.last_note {
+                ui.add_space(4.0);
+                ui.label(RichText::new(note).small().color(pal.identity_high));
+            }
             if let Some(err) = &app.assemble_modal.error {
                 ui.label(RichText::new(err).small().color(pal.identity_low));
             }
             ui.add_space(8.0);
-            if ui.button("Run Operation").clicked() {
+            if ui.button("Run Alignment / Assembly").clicked() {
                 run = true;
             }
         });
 
+    if browse_minimap2 {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("minimap2 executable", &["exe", ""])
+            .pick_file()
+        {
+            app.assemble_modal.minimap2_custom_path = path.display().to_string();
+        }
+    }
+
     if run {
         match app.assemble_modal.mode {
             0 => {
-                let op_id = app.start_operation("Multiple Align (NW)", "Aligning active document");
-                let res = app.current_doc_mut().map(|d| {
-                    let r = d.alignment.realign_progressive();
-                    if r.is_ok() {
-                        d.invalidate_caches();
+                let alg = app.assemble_modal.algorithm;
+                let op_id = app.start_operation(
+                    format!("Align ({})", alg.short_name()),
+                    alg.label(),
+                );
+                let custom_path = if app.assemble_modal.minimap2_custom_path.trim().is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(
+                        app.assemble_modal.minimap2_custom_path.trim(),
+                    ))
+                };
+                let cfg = AlignerConfig {
+                    algorithm: alg,
+                    minimap2_path: custom_path,
+                    minimap2_preset: app.assemble_modal.minimap2_preset,
+                    gap_open: app.assemble_modal.gap_open,
+                    gap_extend: app.assemble_modal.gap_extend,
+                };
+                if let Some(doc) = app.current_doc() {
+                    let pid = doc.id;
+                    let pname = doc.alignment.name.clone();
+                    let alpha = doc.alignment.alphabet;
+                    let seqs = doc.alignment.sequences().to_vec();
+                    let out_name = format!("{pname} ({})", alg.short_name());
+                    match run_alignment_algorithm(out_name, alpha, &seqs, &cfg) {
+                        Ok(out) => {
+                            let note = out.engine_note.clone();
+                            app.add_workspace_doc(
+                                "Alignments",
+                                false,
+                                out.alignment,
+                                None,
+                                Some(LineageEntry {
+                                    operation: format!("Multiple Alignment ({})", alg.short_name()),
+                                    parent_ids: vec![pid],
+                                    parent_names: vec![pname],
+                                    details: note.clone(),
+                                }),
+                            );
+                            app.finish_operation(op_id, OperationStatus::Completed, note.clone());
+                            app.assemble_modal.last_note = Some(note.clone());
+                            app.assemble_modal.error = None;
+                            app.status_message = note;
+                            open = false;
+                        }
+                        Err(err) => {
+                            app.finish_operation(op_id, OperationStatus::Failed, err.to_string());
+                            app.assemble_modal.error = Some(err.to_string());
+                        }
                     }
-                    r
-                });
-                match res {
-                    Some(Ok(())) => {
-                        app.finish_operation(op_id, OperationStatus::Completed, "Progressive alignment complete");
-                        app.status_message = String::from("Multiple sequence alignment complete.");
-                        app.assemble_modal.error = None;
-                        open = false;
-                    }
-                    Some(Err(err)) => {
-                        app.finish_operation(op_id, OperationStatus::Failed, err.to_string());
-                        app.assemble_modal.error = Some(err.to_string());
-                    }
-                    None => {}
                 }
             }
             1 => {
@@ -724,15 +880,45 @@ fn show_blast_modal(app: &mut HelixApp, ctx: &Context) {
     }
     let pal = Palette::for_mode(app.theme);
     let mut open = app.blast_modal.open;
-    let mut run_blast = false;
+    let mut trigger_blast = false;
     let mut jump_to: Option<(usize, usize, usize)> = None;
 
-    egui::Window::new("BLAST Similarity Search (Local Workspace)")
+    egui::Window::new("BLAST Similarity Search (totalBLAST / blastn / blastp / blastx / tblastn / tblastx / MegaBLAST)")
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_width(640.0)
+        .default_width(720.0)
         .show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Program:").strong());
+                egui::ComboBox::from_id_salt("blast_program_cb")
+                    .selected_text(app.blast_modal.config.program.label())
+                    .width(290.0)
+                    .show_ui(ui, |ui| {
+                        for prog in BlastProgram::ALL {
+                            ui.selectable_value(
+                                &mut app.blast_modal.config.program,
+                                prog,
+                                prog.label(),
+                            );
+                        }
+                    });
+
+                ui.label("Min ID %:");
+                ui.add(
+                    egui::DragValue::new(&mut app.blast_modal.config.min_identity_pct)
+                        .range(20.0..=100.0)
+                        .suffix("%"),
+                );
+
+                ui.label("Max E:");
+                ui.add(
+                    egui::DragValue::new(&mut app.blast_modal.config.max_e_value)
+                        .range(1e-20..=1000.0)
+                        .speed(0.5),
+                );
+            });
+            ui.add_space(4.0);
             ui.label(RichText::new("Query Sequence (DNA / RNA / Protein):").small().strong());
             ui.add(
                 egui::TextEdit::multiline(&mut app.blast_modal.query)
@@ -741,11 +927,11 @@ fn show_blast_modal(app: &mut HelixApp, ctx: &Context) {
                     .desired_width(f32::INFINITY),
             );
             ui.horizontal(|ui| {
-                if ui.button("Run Local BLAST").clicked() {
-                    run_blast = true;
+                if ui.button(format!("Run {}", app.blast_modal.config.program.short_tag())).clicked() {
+                    trigger_blast = true;
                 }
                 ui.label(
-                    RichText::new("k-mer seeding + X-drop HSP extension across all workspace documents")
+                    RichText::new("totalBLAST automatically searches BOTH nucleotide strands AND 6-frame translated protein databases!")
                         .small()
                         .color(pal.text_muted),
                 );
@@ -753,30 +939,44 @@ fn show_blast_modal(app: &mut HelixApp, ctx: &Context) {
             ui.separator();
 
             if app.blast_modal.hits.is_empty() {
-                ui.label(RichText::new("Click 'Run Local BLAST' to find homologous regions.").small().color(pal.text_muted));
+                ui.label(
+                    RichText::new("Click Run above to search workspace documents across DNA & 6-frame translated Protein space.")
+                        .small()
+                        .color(pal.text_muted),
+                );
             } else {
                 ScrollArea::vertical().max_height(210.0).show(ui, |ui| {
                     egui::Grid::new("blast_hits_grid")
-                        .num_columns(6)
+                        .num_columns(7)
                         .striped(true)
                         .spacing([10.0, 4.0])
                         .show(ui, |ui| {
-                            for hdr in ["Document", "Subject", "Identity", "Bit Score", "E-value", "Action"] {
+                            for hdr in ["Mode / Frame", "Document", "Subject", "Identity / Pos", "Bit Score", "E-value", "Action"] {
                                 ui.label(RichText::new(hdr).strong().small().color(pal.text_muted));
                             }
                             ui.end_row();
 
                             for (idx, hit) in app.blast_modal.hits.iter().enumerate() {
                                 let sel = app.blast_modal.selected_hit == Some(idx);
+                                ui.label(
+                                    RichText::new(&hit.program_tag)
+                                        .monospace()
+                                        .small()
+                                        .strong()
+                                        .color(pal.accent),
+                                );
                                 if ui.selectable_label(sel, &hit.doc_name).clicked() {
                                     app.blast_modal.selected_hit = Some(idx);
                                 }
                                 ui.label(RichText::new(&hit.subject_name).small());
                                 ui.label(
-                                    RichText::new(format!("{:.1}% ({} len)", hit.identity_pct, hit.align_len))
-                                        .monospace()
-                                        .small()
-                                        .color(pal.identity_high),
+                                    RichText::new(format!(
+                                        "{:.0}% / {:.0}% ({} len)",
+                                        hit.identity_pct, hit.positives_pct, hit.align_len
+                                    ))
+                                    .monospace()
+                                    .small()
+                                    .color(pal.identity_high),
                                 );
                                 ui.label(RichText::new(format!("{:.1}", hit.bit_score)).monospace().small());
                                 ui.label(RichText::new(format!("{:.2e}", hit.e_value)).monospace().small());
@@ -796,7 +996,17 @@ fn show_blast_modal(app: &mut HelixApp, ctx: &Context) {
                             .stroke(Stroke::new(1.0, pal.border))
                             .inner_margin(egui::Margin::same(6.0))
                             .show(ui, |ui| {
-                                ui.label(RichText::new("HSP Alignment Preview:").small().strong());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "HSP Alignment Preview [{}] ({}..{} on {}):",
+                                        hit.program_tag,
+                                        hit.subject_start + 1,
+                                        hit.subject_end,
+                                        hit.subject_name
+                                    ))
+                                    .small()
+                                    .strong(),
+                                );
                                 let preview = format!(
                                     "Query {:>4}  {}  {}\n            {}\nSubj  {:>4}  {}  {}",
                                     hit.query_start + 1,
@@ -814,8 +1024,12 @@ fn show_blast_modal(app: &mut HelixApp, ctx: &Context) {
             }
         });
 
-    if run_blast {
-        let op_id = app.start_operation("Local BLAST", "Searching all local documents");
+    if trigger_blast {
+        let prog = app.blast_modal.config.program;
+        let op_id = app.start_operation(
+            format!("BLAST ({})", prog.short_tag()),
+            "Searching all local workspace documents",
+        );
         let subjects: Vec<(usize, &Alignment)> = app
             .docs
             .iter()
@@ -823,11 +1037,15 @@ fn show_blast_modal(app: &mut HelixApp, ctx: &Context) {
             .filter(|(_, d)| !d.deleted && d.tree.is_none())
             .map(|(i, d)| (i, &d.alignment))
             .collect();
-        let hits = run_local_blast(&app.blast_modal.query, &subjects, 20);
+        let hits = run_blast(&app.blast_modal.query, &subjects, app.blast_modal.config);
         let n = hits.len();
         app.blast_modal.hits = hits;
         app.blast_modal.selected_hit = if n > 0 { Some(0) } else { None };
-        app.finish_operation(op_id, OperationStatus::Completed, format!("Found {n} BLAST hit(s)"));
+        app.finish_operation(
+            op_id,
+            OperationStatus::Completed,
+            format!("{} found {n} hit(s)", prog.short_tag()),
+        );
     }
 
     if let Some((doc_idx, s, e)) = jump_to {

@@ -4,19 +4,20 @@
 use egui::{Color32, Rounding, Stroke, Style, Visuals};
 use helix_core::sequence::is_gap;
 use helix_core::Alphabet;
+use serde::{Deserialize, Serialize};
 
 /// Application UI theme mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ThemeMode {
     /// Clean modern light slate/white desktop aesthetic inspired by Geneious Prime.
-    #[default]
     Light,
-    /// Modern low-glare dark laboratory aesthetic.
+    /// Modern low-glare dark laboratory aesthetic (default).
+    #[default]
     Dark,
 }
 
 /// Residue color palette selector for the alignment canvas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ColorScheme {
     /// Balanced biochemical palette inspired by Geneious Prime.
     #[default]
@@ -53,7 +54,7 @@ impl ColorScheme {
 }
 
 /// Residue highlighting rule matching Geneious Prime's "Highlighting" control section.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum HighlightMode {
     /// Color all residues according to [`ColorScheme`].
     #[default]

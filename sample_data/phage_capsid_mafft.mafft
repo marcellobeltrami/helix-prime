@@ -1,0 +1,13 @@
+CLUSTAL format alignment by MAFFT L-INS-i (v7.520)
+
+Phage_T4_gp23   atgactatcaaaactaaggcagaa--ttgctgaacaaattgaaagctggcgttactgtta
+Phage_T2_gp23   atgactatcaaaactaaggcagaagtttgctgaacaaattgaaagctggcgttactgtta
+Phage_RB69_gp23 atgactatcaaaactaaggctgaa--ttgctgaacaaactgaaagctggcgttactgtca
+_R_Phage_KVP40  atgactattaaaactaaggcagaa--ttgctgaataaattgaaagctggtgttactgtta
+                ******** *********** ***  ******** *** ********** ******** *
+
+Phage_T4_gp23   aagctgaaggcgacgttctgggtatgaacgttaaaggtgttgttatcgctgacccggctg
+Phage_T2_gp23   aagctgaaggcgacgttctgggtatgaacgttaaaggtgttgttatcgctgacccggctg
+Phage_RB69_gp23 aagctgaaggcgacgttctgggtatgaacgttaaaggtgttgtcatcgctgacccggctg
+_R_Phage_KVP40  aagctgaaggcgatgttctgggtatgaacgttaaaggtgttgttattgctgacccggctg
+                ************* ***************************** ** *************

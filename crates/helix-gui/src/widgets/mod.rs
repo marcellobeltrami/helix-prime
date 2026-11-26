@@ -2,6 +2,7 @@
 
 pub mod alignment_view;
 pub mod circular_view;
+pub mod context_menu;
 pub mod doc_viewer;
 pub mod document_table;
 pub mod inspector_panel;
