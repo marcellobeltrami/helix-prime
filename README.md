@@ -1,4 +1,4 @@
-![HelixPrime icon](./assets/helix-prime-256.png) 
+![HelixPrime icon](./assets/helix-prime-logo.png) 
 # HelixPrime
 
 An open-source, native Rust bioinformatics, sequence alignment inspection, molecular cloning, and 3D protein visualization suite inspired by **Geneious Prime**, with live **NCBI**, **UniProtKB**, **AlphaFold Protein Structure Database (EBI)**, and **RCSB PDB** integration.
